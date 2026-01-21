@@ -5,10 +5,7 @@ use z3rro::prover::{IncrementalMode, Prover};
 
 use crate::{
     ast::{
-        util::{is_bot_lit, is_lit, is_neg_lit, is_one_lit, is_top_lit, is_zero_lit},
-        visit::{walk_expr, VisitorMut},
-        BinOpKind, Expr, ExprBuilder, ExprData, ExprKind, Ident, Shared, Span, Spanned, Symbol,
-        TyKind, UnOpKind,
+        BinOpKind, Expr, ExprBuilder, ExprData, ExprKind, Ident, Shared, Span, Spanned, Symbol, TyKind, UnOpKind, util::{is_bot_lit, is_lit, is_neg_lit, is_one_lit, is_top_lit, is_zero_lit, remove_casts}, visit::{VisitorMut, walk_expr}
     },
     resource_limits::{LimitError, LimitsRef},
     smt::SmtCtx,
@@ -127,6 +124,7 @@ impl<'smt, 'ctx> VisitorMut for NeutralsRemover<'smt, 'ctx> {
     type Err = LimitError;
 
     fn visit_expr(&mut self, e: &mut Expr) -> Result<(), Self::Err> {
+        // println!("visitexprcall: {e}");
         self.subst.limits_ref.check_limits()?;
         let ty = e.ty.clone().unwrap();
 
@@ -146,11 +144,12 @@ impl<'smt, 'ctx> VisitorMut for NeutralsRemover<'smt, 'ctx> {
                     let builder = ExprBuilder::new(Span::dummy_span());
                     if is_neg_lit(&args[0]) {
                         *e = builder.zero_lit(&TyKind::UReal);
-                    } else if is_lit(&args[0]) {
+                    } 
+                    else if is_lit(&args[0]) {
                         // using cast doesn't work, because maybe the type is unsinged.
                         // but since we know the value is positive, we can do this. 
                         *e = Expr::new(ExprData {
-                            kind: args[0].kind.clone(),
+                            kind: remove_casts(&args[0].clone()).kind.clone(),
                             ty: Some(TyKind::UReal),
                             span: args[0].span,
                         });

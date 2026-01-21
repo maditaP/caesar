@@ -31,6 +31,25 @@ impl Expr {
         };
         replace_with::replace_with(self, default, f)
     }
+    pub fn func_calls(&self) -> Vec<Ident> {
+        match &self.kind {
+            ExprKind::Call(f, _) => vec![*f],
+            ExprKind::Binary(_, lhs, rhs) => {
+                let mut calls = lhs.func_calls();
+                calls.extend(rhs.func_calls());
+                calls
+            }
+            ExprKind::Unary(_, inner) => inner.func_calls(),
+            ExprKind::Cast(inner) => inner.func_calls(),
+            ExprKind::Ite(cond, then_expr, else_expr) => {
+                let mut calls = cond.func_calls();
+                calls.extend(then_expr.func_calls());
+                calls.extend(else_expr.func_calls());
+                calls
+            }
+            _ => vec![],
+        }
+    }
 }
 
 impl fmt::Display for Expr {

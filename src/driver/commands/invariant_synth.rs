@@ -2,11 +2,16 @@ use std::{collections::HashMap, ops::DerefMut, process::ExitCode, sync::Arc};
 
 use crate::ast::util::remove_casts;
 use crate::ast::visit::VisitorMut;
-use crate::ast::Ident;
-use crate::invariant_synthesis::inv_synth_helpers::{FunctionInliner, create_subst_mapping, get_model_for_constraints, subst_from_mapping};
+use crate::ast::{Direction, Ident};
+use crate::driver::front::SourceUnit;
+use crate::invariant_synthesis::inv_synth_helpers::{
+    create_subst_mapping, get_functions_from_source_unit, get_model_for_constraints,
+    subst_from_mapping, FunctionInliner, InsertAssumeBeforeCalls,
+};
 use crate::invariant_synthesis::template_gen::{build_template_expression, get_synth_functions};
 use crate::opt::remove_neutrals::NeutralsRemover;
 use crate::opt::unfolder::Unfolder;
+use crate::resource_limits::LimitError;
 use crate::smt::funcs::axiomatic::AxiomaticFunctionEncoder;
 use crate::{
     ast::{BinOpKind, Expr, ExprBuilder, FileId, Span, TyKind},
@@ -97,7 +102,7 @@ fn synth_inv_main(
     user_files: &[FileId],
 ) -> Result<bool, CaesarError> {
     let start_total = Instant::now();
-    let mut split_count = 0;
+    let mut split_count = 1;
     let mut num_proven: usize = 0;
     let mut num_failures: usize = 0;
     let mut total_num_cegis_its = 0;
@@ -139,29 +144,71 @@ fn synth_inv_main(
         // the SMT translation later
         let mut depgraph = module.generate_depgraph(&options.opt_options.function_encoding)?;
 
-        let mut synth_inv_units: Vec<Item<CoreVerifyTask>> = module
-            .items
-            .into_iter()
-            .flat_map(|item| {
-                item.flat_map(|unit| CoreVerifyTask::from_source_unit(unit, &mut depgraph))
-            })
-            .collect();
+        let mut target_funcs: Vec<Ident> = Vec::new();
+
+
+        // I am DYING over here
+        for item in &module.items {
+            // get functions from this item
+            let mut fn_names = get_functions_from_source_unit(item);
+
+            // append to our vector
+            target_funcs.append(&mut fn_names);
+
+            // println!("Functions in this item: {:?}", fn_names);
+            // println!("Source unit: {:}", item);
+        }
+
+        // let mut synth_inv_units: Vec<Item<CoreVerifyTask>> = module
+        //     .items
+        //     .into_iter()
+        //     .flat_map(|item| {
+        //         item.flat_map(|unit| CoreVerifyTask::from_source_unit(unit, &mut depgraph))
+        //     })
+        //     .collect();
 
         // set requested global z3 options
         set_global_z3_params(options, &limits_ref);
 
-        for synth_inv_unit in &mut synth_inv_units {
+        // for synth_inv_unit in &mut synth_inv_units {
+        for item in module.items {
+            // println!("item: {}", item);
+            let ctx = Context::new(&z3::Config::default());
+            let function_encoder = mk_function_encoder(&tcx, &depgraph, options)?;
+            let dep_config = DepConfig::All;
+            {
+                let smt_ctx = SmtCtx::new(&ctx, &tcx, function_encoder, dep_config);
+
+                // let synth = get_synth_functions(smt_ctx.uninterpreteds());
+
+                // println!("unin: {:?}", );}
+                // for (id, func) in &smt_ctx.uninterpreteds().functions {
+                //     println!("unin {id}, {:#?}, {}", func.inputs, func.decl);}
+            }
+            println!("looking for function {target_funcs:?}");
+             let mut visitor = InsertAssumeBeforeCalls {
+                func_idents: &target_funcs,
+                direction: Direction::Up, // or whatever is appropriate
+            };
+            let Some(mut synth_inv_unit) =
+                item.flat_map(|unit| CoreVerifyTask::from_source_unit2(unit, &mut depgraph, &mut visitor))
+            else {
+                continue;
+            };
             // --- Phase 0: Create the completely uninstatiated verification condition ---
             limits_ref.check_limits()?;
 
+            println!("synth_unit: {synth_inv_unit}");
             let (name, mut synth_inv_unit) = synth_inv_unit.enter_with_name();
 
             // Set the current unit as ongoing
             server.set_ongoing_unit(name)?;
+            // return Err(CaesarError::Interrupted);
 
             // Lowering the core synth_inv_unit task to a quantitative prove task: applying
             // spec call desugaring, preparing slicing, and verification condition
             // generation.
+
             let (mut vc_expr, slice_vars) = lower_core_verify_task(
                 &mut tcx,
                 name,
@@ -170,6 +217,9 @@ fn synth_inv_main(
                 server,
                 &mut synth_inv_unit,
             )?;
+
+            println!("vc expression: {}", vc_expr.expr);
+
 
             // The constraints are a conjunction of Expressions, so we start with true
 
@@ -190,6 +240,9 @@ fn synth_inv_main(
             let dep_config = DepConfig::Set(vc_is_valid.get_dependencies());
             let smt_ctx = SmtCtx::new(&ctx, &tcx, function_encoder, dep_config);
             let mut translate = TranslateExprs::new(&smt_ctx);
+
+            println!("vc_is_valid: {}", vc_is_valid.vc);
+            // return Err(CaesarError::Interrupted);
 
             let synth = get_synth_functions(smt_ctx.uninterpreteds());
 
@@ -237,10 +290,11 @@ fn synth_inv_main(
 
                     let mut unfolder = Unfolder::new(limits_ref.clone(), &smt_ctx_local);
                     unfolder.visit_expr(&mut tpl)?;
+                    // println!("template for `{}`: {} before neutrals remover", synth_name, remove_casts(&tpl));
 
-                    let mut neutrals_remover =
-                        NeutralsRemover::new(limits_ref.clone(), &smt_ctx_local);
-                    neutrals_remover.visit_expr(&mut tpl)?;
+                    // let mut neutrals_remover =
+                    //     NeutralsRemover::new(limits_ref.clone(), &smt_ctx_local);
+                    // neutrals_remover.visit_expr(&mut tpl)?;
 
                     println!("template for `{}`: {}", synth_name, remove_casts(&tpl));
 
@@ -302,7 +356,7 @@ fn synth_inv_main(
                         let value = tvar_mapping
                             .get(&id)
                             .cloned()
-                            .unwrap_or_else(|| builder.zero_lit(&TyKind::EUReal));
+                            .unwrap_or_else(|| builder.zero_lit(&TyKind::Real));
                         (id.clone(), value)
                     })
                     .collect();
@@ -325,7 +379,7 @@ fn synth_inv_main(
                 };
 
                 refined_vc.unfold(options, &limits_ref, &tcx)?;
-                refined_vc.remove_neutrals(&limits_ref, &tcx)?;
+                // refined_vc.remove_neutrals(&limits_ref, &tcx)?;
 
                 let refined_vc =
                     lower_quant_prove_task(options, &limits_ref, &tcx, name, refined_vc)?;
@@ -427,8 +481,12 @@ fn synth_inv_main(
                 // Here we add the original vc_tvars_pvars instantiated with the model for the program variables
                 // to the constraint we use to find valuations for the template variables.
                 if let Some(model) = result.model {
+                
                     let mapping = create_subst_mapping(&model, &mut translate);
 
+                    for (ident, expr) in &mapping {
+                        println!("in cex, {ident} -> {expr}");
+                    }
                     let filtered_mapping: HashMap<Ident, Expr> = mapping
                         .iter()
                         .filter(|(key, _)| !all_template_vars.contains(key))
@@ -457,6 +515,7 @@ fn synth_inv_main(
                             return Err(e.into());
                         }
                     };
+                    println!("Adding constraint {}", new_constraint.vc);
 
                     // Add the new constraint to the constraint-set via conjunction
                     constraints = builder.binary(
@@ -481,6 +540,7 @@ fn synth_inv_main(
                         constraints_on_tvars_bool_task,
                         &mut translate,
                     )? {
+                        println!("model found");
                         // Update template variable mapping; zero-extension happens at top of loop
                         tvar_mapping = mapping;
 

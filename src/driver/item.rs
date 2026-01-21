@@ -73,6 +73,7 @@ impl fmt::Display for SourceUnitName {
 }
 
 /// An _item_ is a piece of input. An item can be a procedure, a function, or a domain declaration.
+#[derive(Clone)]
 pub struct Item<T> {
     name: SourceUnitName,
     span: tracing::Span,
@@ -146,7 +147,7 @@ impl<T> Deref for Item<T> {
 }
 
 pub struct ItemEntered<'a, T> {
-    item: &'a mut T,
+    pub item: &'a mut T,
     _entered: tracing::span::Entered<'a>,
 }
 

@@ -64,6 +64,38 @@ pub fn lower_core_verify_task(
     Ok((vc, slice_stmts))
 }
 
+
+
+
+/// Lower a core verification task into a quantitative vc prove task: apply
+/// desugaring for spec calls, preparing slicing, and verification condition
+/// generation.
+pub fn lower_core_synth_task(
+    tcx: &mut TyCtx,
+    name: &SourceUnitName,
+    options: &VerifyCommand,
+    limits_ref: &LimitsRef,
+    server: &mut dyn Server,
+    task: &mut CoreVerifyTask,
+) -> Result<(QuantVcProveTask, SliceStmts), CaesarError> {
+    // 1. Desugaring
+    task.desugar_spec_calls(tcx, name.to_string())?;
+
+    // 2. Preparing slicing
+    let slice_stmts = task.prepare_slicing(&options.slice_options, tcx, server)?;
+
+    // print HeyVL core after desugaring if requested
+    if options.debug_options.print_core {
+        println!("{}: HeyVL core query:\n{}\n", name, *task);
+    }
+
+    // 3. Verification condition generation
+    let vc = task.vcgen(limits_ref, tcx, &options.lsp_options, server)?;
+
+    Ok((vc, slice_stmts))
+}
+
+
 /// A block of HeyVL statements to be verified with a certain [`Direction`].
 #[derive(Debug, Clone)]
 pub struct CoreVerifyTask {
@@ -87,29 +119,74 @@ impl CoreVerifyTask {
             }
         };
 
-        match source_unit {
-            SourceUnit::Decl(decl) => {
-                match decl {
-                    DeclKind::ProcDecl(proc_decl) => {
-                        let (direction, block) = encode_proc_verify(&proc_decl.borrow())?;
-                        Some(CoreVerifyTask {
-                            deps,
-                            direction,
-                            block,
-                        })
-                    }
-                    DeclKind::DomainDecl(_domain_decl) => None, // TODO: check that the axioms are not contradictions
-                    DeclKind::FuncDecl(_func_decl) => None,
-                    _ => unreachable!(), // axioms and variable declarations are not allowed on the top level
-                }
+    // Then build the CoreVerifyTask if possible
+    match source_unit {
+        SourceUnit::Decl(decl) => match decl {
+            DeclKind::ProcDecl(proc_decl) => {
+                let (direction, block) = encode_proc_verify(&proc_decl.borrow())?;
+                Some(CoreVerifyTask {
+                    deps,
+                    direction,
+                    block,
+                })
             }
-            SourceUnit::Raw(block) => Some(CoreVerifyTask {
-                deps,
-                direction: Direction::Down,
-                block,
-            }),
-        }
+            DeclKind::DomainDecl(_domain_decl) => None, // TODO: check axioms
+            DeclKind::FuncDecl(_func_decl) => None,
+            _ => unreachable!(), // top-level axioms or vars not allowed
+        },
+        SourceUnit::Raw(block) => Some(CoreVerifyTask {
+            deps,
+            direction: Direction::Down,
+            block,
+        }),
     }
+}
+
+ pub fn from_source_unit2<V: VisitorMut>(
+    mut source_unit: SourceUnit,
+    depgraph: &mut DepGraph,
+    visitor: &mut V,
+) -> Option<Self> {
+    // First, compute deps while visiting the AST
+    let deps = match &mut source_unit {
+        SourceUnit::Decl(decl) => {
+            // Apply the visitor to the declaration
+            visitor.visit_decl(decl).ok()?;
+            // Then compute reachable dependencies
+            depgraph.get_reachable([decl.name()])
+        }
+        SourceUnit::Raw(block) => {
+            // Apply the visitor to the block
+            visitor.visit_block(block).ok()?;
+            assert!(depgraph.current_deps.is_empty());
+            let current_deps = std::mem::take(&mut depgraph.current_deps);
+            depgraph.get_reachable(current_deps)
+        }
+    };
+
+    // Then build the CoreVerifyTask if possible
+    match source_unit {
+        SourceUnit::Decl(decl) => match decl {
+            DeclKind::ProcDecl(proc_decl) => {
+                let (direction, block) = encode_proc_verify(&proc_decl.borrow())?;
+                Some(CoreVerifyTask {
+                    deps,
+                    direction,
+                    block,
+                })
+            }
+            DeclKind::DomainDecl(_domain_decl) => None, // TODO: check axioms
+            DeclKind::FuncDecl(_func_decl) => None,
+            _ => unreachable!(), // top-level axioms or vars not allowed
+        },
+        SourceUnit::Raw(block) => Some(CoreVerifyTask {
+            deps,
+            direction: Direction::Down,
+            block,
+        }),
+    }
+}
+
 
     /// Desugar assignments with procedure calls.
     #[instrument(skip_all)]

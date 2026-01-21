@@ -292,7 +292,7 @@ pub fn init_tcx(files: &mut Files) -> TyCtx {
 
 /// A unit of source code that can be independently type-checked and verified.
 /// It is either a declaration or just a series of raw HeyVL statements.
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum SourceUnit {
     Decl(DeclKind),
     Raw(Block),

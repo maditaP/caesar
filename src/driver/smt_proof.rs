@@ -149,6 +149,7 @@ pub fn run_smt_prove_task(
     let mut translate = TranslateExprs::new(&smt_ctx);
     let mut vc_is_valid = SmtVcProveTask::translate(vc_is_valid, &mut translate);
 
+    println!("vc_is_valid after function encoding: {}", vc_is_valid.quant_vc.expr);
     if !options.opt_options.no_simplify {
         vc_is_valid.simplify();
     }

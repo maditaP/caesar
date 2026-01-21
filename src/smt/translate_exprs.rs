@@ -378,6 +378,13 @@ impl<'smt, 'ctx> TranslateExprs<'smt, 'ctx> {
             },
             ExprKind::Unary(un_op, operand) => match un_op.node {
                 UnOpKind::Parens => self.t_real(operand),
+                UnOpKind::Iverson => {
+                    let operand = self.t_bool(operand);
+                    EUReal::iverson(self.ctx.eureal(), &operand)
+                        .get_ureal()
+                        .as_real()
+                        .clone()
+                }
                 _ => panic!("illegal exprkind {:?} of expression {:?}", un_op, &expr),
             },
             ExprKind::Cast(operand) => {
@@ -470,6 +477,11 @@ impl<'smt, 'ctx> TranslateExprs<'smt, 'ctx> {
                         let operand = self.t_uint(operand);
                         UReal::from_uint(&operand)
                     }
+                    // //TODO!!
+                    // TyKind::UReal => {
+                    //     let operand = self.t_ureal(operand);
+                    //     operand
+                    // }
                     _ => panic!("illegal cast to {:?} from {:?}", &expr.ty, &operand.ty),
                 }
             }

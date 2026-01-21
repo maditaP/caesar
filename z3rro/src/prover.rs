@@ -197,6 +197,7 @@ impl<'ctx> Prover<'ctx> {
         if let Some(cached_result) = &self.last_result {
             return cached_result.last_result;
         }
+        // println!("doing the sat check {}", self.get_smtlib().into_string());
         let res = self.get_solver().check();
         self.cache_result(res);
         res

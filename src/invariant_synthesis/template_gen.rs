@@ -4,10 +4,8 @@ use z3rro::prover::{IncrementalMode, Prover};
 
 use crate::{
     ast::{
-        decl,
-        util::FreeVariableCollector,
-        BinOpKind, DeclKind, DeclRef, Expr, ExprBuilder, ExprData, ExprKind, Ident, Range, Shared,
-        Span, Symbol, TyKind, UnOpKind, VarDecl, VarKind,
+        decl, util::FreeVariableCollector, BinOpKind, DeclKind, DeclRef, Expr, ExprBuilder,
+        ExprData, ExprKind, Ident, Range, Shared, Span, Symbol, TyKind, UnOpKind, VarDecl, VarKind,
     },
     smt::{
         translate_exprs::TranslateExprs,
@@ -16,7 +14,6 @@ use crate::{
     tyctx::TyCtx,
 };
 use std::collections::{HashMap, HashSet};
-
 
 // A helper function to build the templates
 // returns (sum_(param_vars)( templ_var * param_var )) + templ_last
@@ -33,7 +30,9 @@ fn build_linear_combination(
 
     for vardecl in program_var_decls {
         let mut variable = builder.var(vardecl.name, tcx);
-        variable = builder.cast(TyKind::Real, variable.clone());
+        if variable.ty != Some(TyKind::Real) {
+            variable = builder.cast(TyKind::Real, variable.clone());
+        }
 
         let name = format!("tvar_{synth_name}_{name_addon}_{}", vardecl.name.name);
         let decl = declare_template_var(name);
@@ -71,7 +70,6 @@ fn build_linear_combination(
 
     final_expr
 }
-
 pub fn collect_relevant_bool_conditions(
     synth_val: &uninterpreted::FuncEntry,
     vc_expr: &Expr,
@@ -85,8 +83,7 @@ pub fn collect_relevant_bool_conditions(
         allowed_vars.insert(vardecl.name.name);
     }
 
-    
-        collect_bool_conditions(vc_expr)
+    collect_bool_conditions(vc_expr)
         .into_iter()
         .filter(|b| {
             let vars = collect_program_vars(b);
@@ -129,20 +126,28 @@ pub fn get_fix_region_splits<'ctx>(
                 let ratio = BigRational::new(i.into(), split_count.into());
                 let cut_val = &l + &width * ratio;
                 let cut_expr = builder.signed_frac_lit(cut_val);
+                let mut potentially_casted = pv.clone();
+                if pv.ty.clone().unwrap() != TyKind::Real {
+                    potentially_casted = builder.cast(TyKind::Real, pv.clone())
+                }
                 builder.binary(
                     BinOpKind::Le,
                     Some(TyKind::Bool),
-                    builder.cast(TyKind::Real, pv.clone()),
+                    potentially_casted,
                     cut_expr,
                 )
             } else {
                 let ratio = BigRational::new((i - 1).into(), split_count.into());
                 let cut_val = &l + &width * ratio;
                 let cut_expr = builder.signed_frac_lit(cut_val);
+                let mut potentially_casted = pv.clone();
+                if pv.ty.clone().unwrap() != TyKind::Real {
+                    potentially_casted = builder.cast(TyKind::Real, pv.clone())
+                }
                 builder.binary(
                     BinOpKind::Gt,
                     Some(TyKind::Bool),
-                    builder.cast(TyKind::Real, pv.clone()),
+                    potentially_casted,
                     cut_expr,
                 )
             };
@@ -218,35 +223,29 @@ pub fn _get_variable_region_splits<'ctx>(
             let reg = idx % regions_per_var;
             idx /= regions_per_var;
 
-            let pv = program_vars[var_i].clone();
+            let mut pv = program_vars[var_i].clone();
             let cuts = &threshold_vars[var_i];
 
+            if pv.ty.clone().unwrap() != TyKind::Real {
+                pv = builder.cast(TyKind::Real, pv.clone())
+            }
             let pred = match reg {
-                0 => builder.binary(
-                    BinOpKind::Lt,
-                    Some(TyKind::Bool),
-                    builder.cast(TyKind::Real, pv.clone()),
-                    cuts[0].clone(),
-                ),
+                0 => builder.binary(BinOpKind::Lt, Some(TyKind::Bool), pv, cuts[0].clone()),
                 r if r == regions_per_var - 1 => builder.binary(
                     BinOpKind::Ge,
                     Some(TyKind::Bool),
-                    builder.cast(TyKind::Real, pv.clone()),
+                    pv,
                     cuts.last().unwrap().clone(),
                 ),
                 r => {
                     let ge_prev = builder.binary(
                         BinOpKind::Ge,
                         Some(TyKind::Bool),
-                        builder.cast(TyKind::Real, pv.clone()),
+                        pv.clone(),
                         cuts[r - 1].clone(),
                     );
-                    let lt_next = builder.binary(
-                        BinOpKind::Lt,
-                        Some(TyKind::Bool),
-                        builder.cast(TyKind::Real, pv.clone()),
-                        cuts[r].clone(),
-                    );
+                    let lt_next =
+                        builder.binary(BinOpKind::Lt, Some(TyKind::Bool), pv, cuts[r].clone());
                     builder.binary(BinOpKind::And, Some(TyKind::Bool), ge_prev, lt_next)
                 }
             };
@@ -293,7 +292,8 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
 
             num_sat_checks = num_sat_checks + 1;
             if prover.check_sat() == SatResult::Sat {
-                let iverson_both = builder.unary(UnOpKind::Iverson, Some(output_type.clone()), both);
+                let iverson_both =
+                    builder.unary(UnOpKind::Iverson, Some(output_type.clone()), both);
 
                 // Pass precomputed program_var_decls
                 let lc_name = format!("{}_{}", i_idx, s_idx);
@@ -307,11 +307,14 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
                     output_type.clone(),
                 );
 
-                let full = builder.binary(BinOpKind::Mul, Some(output_type.clone()), iverson_both, lc);
+                let full =
+                    builder.binary(BinOpKind::Mul, Some(output_type.clone()), iverson_both, lc);
 
                 final_expr = Some(match final_expr {
                     None => full,
-                    Some(acc) => builder.binary(BinOpKind::Add, Some(output_type.clone()), acc, full),
+                    Some(acc) => {
+                        builder.binary(BinOpKind::Add, Some(output_type.clone()), acc, full)
+                    }
                 });
             }
         }
@@ -344,8 +347,8 @@ pub fn build_template_expression<'smt, 'ctx>(
             .unwrap();
         if vardecl.ty != TyKind::Bool {
             let raw = builder.var(vardecl.name, tcx);
-            let mut casted=raw.clone();
-            if vardecl.ty != TyKind::Real{
+            let mut casted = raw.clone();
+            if vardecl.ty != TyKind::Real {
                 casted = builder.cast(TyKind::Real, raw.clone());
             }
             program_var_decls.push(vardecl);
@@ -360,7 +363,7 @@ pub fn build_template_expression<'smt, 'ctx>(
 
     // Template-variable declaration closure
     let mut declare_template_var = |name: String| -> decl::VarDecl {
-        let full_name = format!("{}{}", name, split_count+1);
+        let full_name = format!("{}{}", name, split_count + 1);
         let ident = Ident::with_dummy_span(Symbol::intern(&full_name));
         let decl = VarDecl {
             name: ident,
@@ -411,6 +414,10 @@ pub fn build_template_expression<'smt, 'ctx>(
             builder.bool_lit(true), // initial Iverson factor
             &mut valid_iversons,    // output
         );
+
+    // for iv in valid_iversons.clone() {
+    //     println!("bool guard: {iv}");
+    // }
 
     // Step 4: Combine original guards × split conditions and multiply each with own lin.exp
     let (mut final_expr, temp_sat_checks) = assemble_piecewise_expression(
@@ -470,7 +477,6 @@ pub fn get_synth_functions<'ctx>(
 /// The recursion stops at a complete assignment (when all Boolean variables have been
 /// assigned) or when an unsatisfiable prefix is encountered. If a satisfiable assignment
 /// is found, the guards for that assignment are added to the result list.
-
 fn explore_boolean_assignments<'smt, 'ctx>(
     idx: usize,
     bool_exprs: &[Expr],
@@ -479,20 +485,20 @@ fn explore_boolean_assignments<'smt, 'ctx>(
     ctx: &'ctx z3::Context,
     partial_assign: &mut Vec<bool>,
     iverson_prod: Expr,
-    valid_iversons: &mut Vec<Expr>, // Accumulate Iverson products here
+    valid_iversons: &mut Vec<Expr>,
 ) -> usize {
     // Base case: a complete assignment
     if idx == bool_exprs.len() {
-        valid_iversons.push(iverson_prod); // Add this Iverson product to the list of valid ones
+        valid_iversons.push(iverson_prod);
         return 0;
     }
 
     let mut num_sat_checks = 0;
+
     // Recursive case: branch on bit = false / true
     for &bit in &[false, true] {
         partial_assign.push(bit);
 
-        // Build conjunction for this prefix
         let mut new_iverson = iverson_prod.clone();
         {
             let b = bool_exprs[idx].clone();
@@ -511,8 +517,7 @@ fn explore_boolean_assignments<'smt, 'ctx>(
         prover.add_assumption(&expr_z3);
 
         if prover.check_sat() == SatResult::Sat {
-            // Prefix is SAT -> explore deeper
-            num_sat_checks = 1 + explore_boolean_assignments(
+            num_sat_checks += 1 + explore_boolean_assignments(
                 idx + 1,
                 bool_exprs,
                 builder,
@@ -520,7 +525,7 @@ fn explore_boolean_assignments<'smt, 'ctx>(
                 ctx,
                 partial_assign,
                 new_iverson,
-                valid_iversons, // Accumulate satisfiable Iverson products
+                valid_iversons,
             );
         } else {
             tracing::trace!("Pruned UNSAT prefix");
@@ -528,7 +533,23 @@ fn explore_boolean_assignments<'smt, 'ctx>(
 
         partial_assign.pop();
     }
+
     num_sat_checks
+}
+
+//TODO!
+// Hm this is not really good. In reality we want to take a better look at the pre
+// and basically if there is an || or a + , we want to take both + and neg, if not we don't?
+// This also holds for asserts
+fn _split_vc(expr: &Expr) -> (&Expr, &Expr) {
+    match &expr.kind {
+        ExprKind::Binary(bin_op, lhs, rhs) => match bin_op.node {
+            BinOpKind::Impl => (lhs, rhs),
+            BinOpKind::CoImpl => (lhs, rhs),
+            _ => panic!("Expected top-level Impl or CoImpl"),
+        },
+        _ => panic!("Expected top-level implication VC"),
+    }
 }
 
 /// Collect all boolean expressions that appear either:
@@ -540,11 +561,7 @@ pub fn collect_bool_conditions(expr: &Expr) -> Vec<Expr> {
     collect_bool_conditions_rec(expr, &mut out, &mut seen);
     out
 }
-fn collect_bool_conditions_rec(
-    expr: &Expr,
-    out: &mut Vec<Expr>,
-    seen: &mut Vec<*const Expr>,
-) {
+fn collect_bool_conditions_rec(expr: &Expr, out: &mut Vec<Expr>, seen: &mut Vec<*const Expr>) {
     match &expr.kind {
         // a) ITE condition
         ExprKind::Ite(cond, then_branch, else_branch) => {
@@ -556,9 +573,7 @@ fn collect_bool_conditions_rec(
         }
 
         // b) Unary Iverson operator
-        ExprKind::Unary(un_op, operand)
-            if matches!(un_op.node, UnOpKind::Iverson) =>
-        {
+        ExprKind::Unary(un_op, operand) if matches!(un_op.node, UnOpKind::Iverson) => {
             record_if_new(operand, out, seen);
             collect_bool_conditions_rec(operand, out, seen);
         }

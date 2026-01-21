@@ -18,7 +18,7 @@ pub struct Uninterpreteds<'ctx> {
     ctx: &'ctx Context,
     symbolizer: Symbolizer,
     sorts: HashMap<Ident, Sort<'ctx>>,
-    functions: HashMap<Ident, FuncEntry<'ctx>>,
+    pub(crate) functions: HashMap<Ident, FuncEntry<'ctx>>,
     axioms: Vec<(Ident, Bool<'ctx>, bool)>,
 }
 
