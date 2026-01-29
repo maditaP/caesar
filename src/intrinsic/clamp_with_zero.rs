@@ -46,8 +46,13 @@ impl FuncIntrin for ClampWithZeroIntrin {
                 caller: 1,
             });
         };
-        tycheck.try_cast(call_span, &TyKind::Real, x)?;
-        Ok(TyKind::UReal)
+
+        if tycheck.try_cast(call_span, &TyKind::Int, x).is_ok() {
+            Ok(TyKind::UInt)
+        } else {
+            tycheck.try_cast(call_span, &TyKind::Real, x)?;
+            Ok(TyKind::UReal)
+        }
     }
 
     fn translate_call<'smt, 'ctx>(
@@ -65,10 +70,9 @@ impl FuncIntrin for ClampWithZeroIntrin {
                 let zero = Int::from_i64(&ctx, 0);
 
                 let cond = x.gt(&zero);
-                let value =
-                    UReal::from_uint(&UInt::unchecked_from_int(cond.ite(&x, &zero)));
+                // let value = UReal::from_uint(&UInt::unchecked_from_int(cond.ite(&x, &zero)));
 
-                Symbolic::UReal(value)
+                Symbolic::UInt(UInt::unchecked_from_int(cond.ite(&x, &zero)))
             }
 
             Some(TyKind::UInt) => {
@@ -79,10 +83,9 @@ impl FuncIntrin for ClampWithZeroIntrin {
                 let zero = Int::from_i64(&ctx, 0);
 
                 let cond = x.gt(&zero);
-                let value =
-                    UReal::from_uint(&UInt::unchecked_from_int(cond.ite(&x, &zero)));
+                // let value = UReal::from_uint(&UInt::unchecked_from_int(cond.ite(&x, &zero)));
 
-                Symbolic::UReal(value)
+                Symbolic::UInt(UInt::unchecked_from_int(cond.ite(&x, &zero)))
             }
 
             Some(TyKind::Real) => {
@@ -92,8 +95,7 @@ impl FuncIntrin for ClampWithZeroIntrin {
 
                 let cond = x.gt(&zero);
 
-                let value =
-                   UReal::unchecked_from_real(cond.ite(&x, &zero));
+                let value = UReal::unchecked_from_real(cond.ite(&x, &zero));
 
                 Symbolic::UReal(value)
             }
@@ -106,8 +108,7 @@ impl FuncIntrin for ClampWithZeroIntrin {
 
                 let cond = x.gt(&zero);
 
-                let value =
-                   UReal::unchecked_from_real(cond.ite(&x, &zero));
+                let value = UReal::unchecked_from_real(cond.ite(&x, &zero));
 
                 Symbolic::UReal(value)
             }
@@ -122,11 +123,10 @@ impl FuncIntrin for ClampWithZeroIntrin {
 
                 let cond = x.gt(&zero);
 
-                let value =
-                   UReal::unchecked_from_real(cond.ite(&x, &zero));
+                let value = UReal::unchecked_from_real(cond.ite(&x, &zero));
 
                 Symbolic::UReal(value)
-            },
+            }
 
             _ => unreachable!("clamp_with_zero only defined for numeric types"),
         }

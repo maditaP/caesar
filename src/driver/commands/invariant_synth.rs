@@ -3,15 +3,12 @@ use std::{collections::HashMap, ops::DerefMut, process::ExitCode, sync::Arc};
 use crate::ast::util::remove_casts;
 use crate::ast::visit::VisitorMut;
 use crate::ast::{Direction, Ident};
-use crate::driver::front::SourceUnit;
 use crate::invariant_synthesis::inv_synth_helpers::{
     create_subst_mapping, get_functions_from_source_unit, get_model_for_constraints,
     subst_from_mapping, FunctionInliner, InsertAssumeBeforeCalls,
 };
 use crate::invariant_synthesis::template_gen::{build_template_expression, get_synth_functions};
-use crate::opt::remove_neutrals::NeutralsRemover;
 use crate::opt::unfolder::Unfolder;
-use crate::resource_limits::LimitError;
 use crate::smt::funcs::axiomatic::AxiomaticFunctionEncoder;
 use crate::{
     ast::{BinOpKind, Expr, ExprBuilder, FileId, Span, TyKind},
@@ -20,7 +17,6 @@ use crate::{
         core_verify::{lower_core_verify_task, CoreVerifyTask},
         error::{finalize_caesar_result, CaesarError},
         front::parse_and_tycheck,
-        item::Item,
         quant_proof::{lower_quant_prove_task, BoolVcProveTask, QuantVcProveTask},
         smt_proof::{mk_function_encoder, set_global_z3_params, SmtVcProveTask},
     },
@@ -188,7 +184,7 @@ fn synth_inv_main(
             println!("looking for function {target_funcs:?}");
              let mut visitor = InsertAssumeBeforeCalls {
                 func_idents: &target_funcs,
-                direction: Direction::Up, // or whatever is appropriate
+                direction: Direction::Down, // or whatever is appropriate
             };
             let Some(mut synth_inv_unit) =
                 item.flat_map(|unit| CoreVerifyTask::from_source_unit2(unit, &mut depgraph, &mut visitor))
@@ -296,6 +292,7 @@ fn synth_inv_main(
                     //     NeutralsRemover::new(limits_ref.clone(), &smt_ctx_local);
                     // neutrals_remover.visit_expr(&mut tpl)?;
 
+                    // println!("template for `{}`: {:?}", synth_name, tpl);
                     println!("template for `{}`: {}", synth_name, remove_casts(&tpl));
 
                     // Store the processed template
@@ -356,7 +353,7 @@ fn synth_inv_main(
                         let value = tvar_mapping
                             .get(&id)
                             .cloned()
-                            .unwrap_or_else(|| builder.zero_lit(&TyKind::Real));
+                            .unwrap_or_else(|| builder.zero_lit(&TyKind::UInt)); //TODO this needs to be output type... but like this requires a mapping which tempvar belongs to which template
                         (id.clone(), value)
                     })
                     .collect();
@@ -459,7 +456,7 @@ fn synth_inv_main(
                     }
 
                     ProveResult::Counterexample => {
-                        // println!("Counterexample found, refining template variables...");
+                        println!("Counterexample found, refining template variables...");
                     }
                     ProveResult::Unknown(msg) => {
                         num_failures += 1;

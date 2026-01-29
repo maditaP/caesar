@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use num::{BigInt, BigRational};
 
 use z3rro::{
@@ -8,19 +10,14 @@ use z3rro::{
 
 use crate::{
     ast::{
-        self, BinOpKind, Block, DeclKind, Direction, DomainSpec, Expr, ExprBuilder, ExprData, ExprKind, Ident, Shared, Span, Spanned, Stmt, StmtKind, TyKind, UnOpKind, visit::{VisitorMut, walk_expr, walk_stmt}
-    },
+        self, BinOpKind, DeclKind, Direction, DomainSpec, Expr, ExprBuilder, ExprData, ExprKind, Ident, Shared, Span, Spanned, Stmt, StmtKind, TyKind, UnOpKind, visit::{VisitorMut, walk_expr, walk_stmt}
+    }, driver::{commands::verify::VerifyCommand, error::CaesarError, quant_proof::BoolVcProveTask, smt_proof::SmtVcProveTask}, resource_limits::LimitsRef, smt::{
+        symbolic::Symbolic, translate_exprs::TranslateExprs, uninterpreted::FuncEntry
+    }, tyctx::TyCtx,
     driver::{
-        commands::verify::VerifyCommand, error::CaesarError, front::SourceUnit,
-        quant_proof::BoolVcProveTask, smt_proof::SmtVcProveTask,
+        front::SourceUnit,
     },
-    resource_limits::LimitsRef,
-    smt::{symbolic::Symbolic, translate_exprs::TranslateExprs, uninterpreted::FuncEntry},
-    tyctx::TyCtx,
 };
-use std::collections::HashMap;
-use std::mem;
-
 // Takes a function and substitutes calls to that function with the functions body,
 // substituting function parameters with the caller argumentspub struct FunctionInliner<'ctx, T: FuncLookup> {
 pub struct FunctionInliner<'smt, 'ctx> {
@@ -332,7 +329,8 @@ impl<'a> InsertAssumeBeforeCalls<'a> {
                 BinOpKind::Le,
                 Some(TyKind::Bool),
                 arg.clone(),
-                builder.one_lit(&arg.ty.clone().unwrap_or(TyKind::Int)),
+                builder.binary(BinOpKind::Add, Some(arg.ty.clone().unwrap_or(TyKind::Int)), builder.one_lit(&arg.ty.clone().unwrap_or(TyKind::Int)), builder.one_lit(&arg.ty.clone().unwrap_or(TyKind::Int)))
+                // builder.one_lit(&arg.ty.clone().unwrap_or(TyKind::Int)),
             );
             if self.direction == Direction::Up {
                 le_expr = builder.unary(UnOpKind::Not, Some(TyKind::Bool), le_expr);

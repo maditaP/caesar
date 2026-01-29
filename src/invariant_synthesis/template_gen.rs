@@ -30,18 +30,18 @@ fn build_linear_combination(
 
     for vardecl in program_var_decls {
         let mut variable = builder.var(vardecl.name, tcx);
-        if variable.ty != Some(TyKind::Real) {
-            variable = builder.cast(TyKind::Real, variable.clone());
+        if variable.ty != Some(output_type.clone()) {
+            variable = builder.cast(output_type.clone(), variable.clone());
         }
 
         let name = format!("tvar_{synth_name}_{name_addon}_{}", vardecl.name.name);
         let decl = declare_template_var(name);
         let templ = builder.var(decl.name, tcx);
-        let templ_paren = builder.unary(UnOpKind::Parens, Some(TyKind::Real), templ);
+        let templ_paren = builder.unary(UnOpKind::Parens, Some(output_type.clone()), templ);
 
-        let prod = builder.binary(BinOpKind::Mul, Some(TyKind::Real), templ_paren, variable);
+        let prod = builder.binary(BinOpKind::Mul, Some(output_type.clone()), templ_paren, variable);
         lin_comb = Some(lin_comb.map_or(prod.clone(), |acc| {
-            builder.binary(BinOpKind::Add, Some(TyKind::Real), acc, prod)
+            builder.binary(BinOpKind::Add, Some(output_type.clone()), acc, prod)
         }));
     }
 
@@ -50,7 +50,7 @@ fn build_linear_combination(
     let last = builder.var(decl.name, tcx);
 
     let lin_comb_with_last = lin_comb.map_or(last.clone(), |acc| {
-        builder.binary(BinOpKind::Add, Some(TyKind::Real), acc, last)
+        builder.binary(BinOpKind::Add, Some(output_type.clone()), acc, last)
     });
 
     // if lin_comb_with_last.ty != Some(output_type.clone()) {
@@ -58,14 +58,22 @@ fn build_linear_combination(
     // }
 
     let clamp_with_zero_name = Ident::with_dummy_span(Symbol::intern("clamp_with_zero"));
+
+    let clamp_with_zero_type;
+    if output_type == TyKind::Int || output_type ==TyKind::UInt
+    {
+        clamp_with_zero_type = TyKind::UInt;
+    } else {
+        clamp_with_zero_type = TyKind::UReal;
+    }
     let mut final_expr = Shared::new(ExprData {
         kind: ExprKind::Call(clamp_with_zero_name, vec![lin_comb_with_last.clone()]),
-        ty: Some(TyKind::UReal),
+        ty: Some(clamp_with_zero_type),
         span: Span::dummy_span(),
     });
 
     if final_expr.ty != Some(output_type.clone()) {
-        final_expr = builder.cast(output_type, final_expr);
+        final_expr = builder.cast(output_type.clone(), final_expr);
     }
 
     final_expr
@@ -333,6 +341,11 @@ pub fn build_template_expression<'smt, 'ctx>(
     translate: &mut TranslateExprs<'smt, 'ctx>,
     ctx: &'ctx z3::Context,
 ) -> (Expr, Vec<Ident>, usize, usize) {
+    let mut output_type = TyKind::EUReal;
+    if let Some(DeclKind::FuncDecl(func_ref)) = tcx.get(*synth_name).as_deref() {
+        output_type = func_ref.borrow().output.clone();
+    }
+
     // Storage for all newly created template parameter identifiers
     let mut template_idents: Vec<Ident> = Vec::new();
     let mut num_sat_checks = 0;
@@ -347,18 +360,15 @@ pub fn build_template_expression<'smt, 'ctx>(
             .unwrap();
         if vardecl.ty != TyKind::Bool {
             let raw = builder.var(vardecl.name, tcx);
+
             let mut casted = raw.clone();
-            if vardecl.ty != TyKind::Real {
-                casted = builder.cast(TyKind::Real, raw.clone());
+            if vardecl.ty != output_type {
+                casted = builder.cast(output_type.clone(), raw.clone());
             }
             program_var_decls.push(vardecl);
             program_vars.push(casted);
             program_vars_no_cast.push(raw);
         }
-    }
-    let mut output_type = TyKind::EUReal;
-    if let Some(DeclKind::FuncDecl(func_ref)) = tcx.get(*synth_name).as_deref() {
-        output_type = func_ref.borrow().output.clone();
     }
 
     // Template-variable declaration closure
@@ -367,7 +377,7 @@ pub fn build_template_expression<'smt, 'ctx>(
         let ident = Ident::with_dummy_span(Symbol::intern(&full_name));
         let decl = VarDecl {
             name: ident,
-            ty: TyKind::Real,
+            ty: output_type.clone(),
             kind: VarKind::Input,
             init: None,
             span: Span::dummy_span(),
@@ -430,7 +440,7 @@ pub fn build_template_expression<'smt, 'ctx>(
         ctx,
         &mut declare_template_var,
         &program_var_decls,
-        output_type,
+        output_type.clone(),
     );
     num_sat_checks = num_sat_checks + temp_sat_checks;
 

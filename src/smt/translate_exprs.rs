@@ -10,8 +10,8 @@ use z3::{
 
 use crate::{
     ast::{
-        BinOpKind, DeclKind, Expr, ExprKind, Ident, LitKind, QuantOpKind, QuantVar, Shared,
-        Trigger, TyKind, UnOpKind,
+        BinOpKind, DeclKind, Expr, ExprBuilder, ExprKind, Ident, LitKind, QuantOpKind, QuantVar,
+        Shared, Span, Trigger, TyKind, UnOpKind,
     },
     scope_map::ScopeMap,
     smt::funcs::fuel::literals::LiteralExprSet,
@@ -127,6 +127,7 @@ impl<'smt, 'ctx> TranslateExprs<'smt, 'ctx> {
     }
 
     pub fn t_bool(&mut self, expr: &Expr) -> Bool<'ctx> {
+        // println!("calling t_bool with:  {expr:?}");
         assert_eq!(
             &expr.ty,
             &Some(TyKind::Bool),
@@ -262,6 +263,14 @@ impl<'smt, 'ctx> TranslateExprs<'smt, 'ctx> {
             },
             ExprKind::Unary(un_op, operand) => match un_op.node {
                 UnOpKind::Parens => self.t_int(operand),
+                UnOpKind::Iverson => {
+                    let builder = ExprBuilder::new(Span::dummy_span());
+
+                    let cond = self.t_bool(operand);
+                    let lhs = self.t_int(&builder.one_lit(&TyKind::Int));
+                    let rhs = self.t_int(&builder.zero_lit(&TyKind::Int));
+                    Int::branch(&cond, &lhs, &rhs)
+                }
                 _ => panic!("illegal exprkind {:?} of expression {:?}", un_op, &expr),
             },
             ExprKind::Cast(operand) => {
@@ -323,6 +332,14 @@ impl<'smt, 'ctx> TranslateExprs<'smt, 'ctx> {
             },
             ExprKind::Unary(un_op, operand) => match un_op.node {
                 UnOpKind::Parens => self.t_uint(operand),
+                UnOpKind::Iverson => {
+                    let builder = ExprBuilder::new(Span::dummy_span());
+
+                    let cond = self.t_bool(operand);
+                    let lhs = self.t_uint(&builder.one_lit(&TyKind::UInt));
+                    let rhs = self.t_uint(&builder.zero_lit(&TyKind::UInt));
+                    UInt::branch(&cond, &lhs, &rhs)
+                }
                 _ => panic!("illegal exprkind"),
             },
             ExprKind::Cast(operand) => {
