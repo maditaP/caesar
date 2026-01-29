@@ -187,7 +187,8 @@ fn synth_inv_main(
                 direction: Direction::Down, // or whatever is appropriate
             };
             let Some(mut synth_inv_unit) =
-                item.flat_map(|unit| CoreVerifyTask::from_source_unit2(unit, &mut depgraph, &mut visitor))
+                // item.flat_map(|unit| CoreVerifyTask::from_source_unit2(unit, &mut depgraph, &mut visitor))
+                item.flat_map(|unit| CoreVerifyTask::from_source_unit(unit, &mut depgraph))
             else {
                 continue;
             };
@@ -292,8 +293,8 @@ fn synth_inv_main(
                     //     NeutralsRemover::new(limits_ref.clone(), &smt_ctx_local);
                     // neutrals_remover.visit_expr(&mut tpl)?;
 
-                    // println!("template for `{}`: {:?}", synth_name, tpl);
-                    println!("template for `{}`: {}", synth_name, remove_casts(&tpl));
+                    println!("template for `{}`: {:?}", synth_name, tpl);
+                    // println!("template for `{}`: {}", synth_name, remove_casts(&tpl));
 
                     // Store the processed template
                     templates.push((synth_name.clone(), tpl, temp_num_guards));
@@ -353,7 +354,7 @@ fn synth_inv_main(
                         let value = tvar_mapping
                             .get(&id)
                             .cloned()
-                            .unwrap_or_else(|| builder.zero_lit(&TyKind::UInt)); //TODO this needs to be output type... but like this requires a mapping which tempvar belongs to which template
+                            .unwrap_or_else(|| builder.zero_lit(&TyKind::UReal)); //TODO this needs to be output type... but like this requires a mapping which tempvar belongs to which template
                         (id.clone(), value)
                     })
                     .collect();
@@ -512,7 +513,7 @@ fn synth_inv_main(
                             return Err(e.into());
                         }
                     };
-                    println!("Adding constraint {}", new_constraint.vc);
+                    // println!("Adding constraint {}", new_constraint.vc);
 
                     // Add the new constraint to the constraint-set via conjunction
                     constraints = builder.binary(

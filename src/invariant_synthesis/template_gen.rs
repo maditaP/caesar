@@ -15,59 +15,124 @@ use crate::{
 };
 use std::collections::{HashMap, HashSet};
 
-// A helper function to build the templates
-// returns (sum_(param_vars)( templ_var * param_var )) + templ_last
-fn build_linear_combination(
+// Helper: generate all monomials of given degree (combinations with repetition)
+fn gen_monomials(
+    vars: &[Expr],
+    degree: usize,
+    start: usize,
+    current: &mut Vec<Expr>,
+    out: &mut Vec<Vec<Expr>>,
+) {
+    if current.len() == degree {
+        out.push(current.clone());
+        return;
+    }
+
+    for i in start..vars.len() {
+        current.push(vars[i].clone());
+        gen_monomials(vars, degree, i, current, out);
+        current.pop();
+    }
+}
+
+// Helper: multiply all expressions in a slice
+fn multiply_all(
+    builder: &ExprBuilder,
+    output_type: &TyKind,
+    factors: &[Expr],
+) -> Expr {
+    let mut acc = factors[0].clone();
+    for f in &factors[1..] {
+        acc = builder.binary(
+            BinOpKind::Mul,
+            Some(output_type.clone()),
+            acc,
+            f.clone(),
+        );
+    }
+    println!("created multiplication {acc:?}");
+    acc
+}
+
+// Main function: build polynomial template up to max_degree
+fn build_polynomial_combination(
     name_addon: String,
     synth_name: &Ident,
     builder: &ExprBuilder,
     tcx: &TyCtx,
     declare_template_var: &mut dyn FnMut(String) -> decl::VarDecl,
     program_var_decls: &[VarDecl],
-    output_type: TyKind,
+    signed_output_type: TyKind,
+    output_type: &TyKind,
+    max_degree: usize, // <-- NEW
 ) -> Expr {
-    let mut lin_comb: Option<Expr> = None;
+    // Collect program variables as expressions (casted)
+    let vars: Vec<Expr> = program_var_decls
+        .iter()
+        .map(|vardecl| {
+            let mut v = builder.var(vardecl.name, tcx);
+            if v.ty != Some(signed_output_type.clone()) {
+                v = builder.cast(signed_output_type.clone(), v);
+            }
+            v
+        })
+        .collect();
 
-    for vardecl in program_var_decls {
-        let mut variable = builder.var(vardecl.name, tcx);
-        if variable.ty != Some(output_type.clone()) {
-            variable = builder.cast(output_type.clone(), variable.clone());
+    let mut poly: Option<Expr> = None;
+
+    // Degrees 1 ..= max_degree
+    for degree in 1..=max_degree {
+        let mut monomials = Vec::new();
+        gen_monomials(&vars, degree, 0, &mut Vec::new(), &mut monomials);
+
+        for (idx, mono) in monomials.into_iter().enumerate() {
+            let prod = multiply_all(builder, &signed_output_type, &mono);
+
+            let coeff_name = format!(
+                "tvar_{synth_name}_{name_addon}_deg{degree}_m{idx}"
+            );
+            let coeff_decl = declare_template_var(coeff_name);
+            let coeff = builder.var(coeff_decl.name, tcx);
+
+            let term = builder.binary(
+                BinOpKind::Mul,
+                Some(signed_output_type.clone()),
+                coeff,
+                prod,
+            );
+
+            poly = Some(poly.map_or(term.clone(), |acc| {
+                builder.binary(BinOpKind::Add, Some(signed_output_type.clone()), acc, term)
+            }));
         }
-
-        let name = format!("tvar_{synth_name}_{name_addon}_{}", vardecl.name.name);
-        let decl = declare_template_var(name);
-        let templ = builder.var(decl.name, tcx);
-        let templ_paren = builder.unary(UnOpKind::Parens, Some(output_type.clone()), templ);
-
-        let prod = builder.binary(BinOpKind::Mul, Some(output_type.clone()), templ_paren, variable);
-        lin_comb = Some(lin_comb.map_or(prod.clone(), |acc| {
-            builder.binary(BinOpKind::Add, Some(output_type.clone()), acc, prod)
-        }));
     }
 
-    // Add the last summand
-    let decl = declare_template_var(format!("tvar_{synth_name}_{name_addon}_last"));
-    let last = builder.var(decl.name, tcx);
+    // Add constant term (degree 0)
+    let const_decl = declare_template_var(format!(
+        "tvar_{synth_name}_{name_addon}_const"
+    ));
+    let constant = builder.var(const_decl.name, tcx);
 
-    let lin_comb_with_last = lin_comb.map_or(last.clone(), |acc| {
-        builder.binary(BinOpKind::Add, Some(output_type.clone()), acc, last)
+    let poly_with_const = poly.map_or(constant.clone(), |acc| {
+        builder.binary(
+            BinOpKind::Add,
+            Some(signed_output_type.clone()),
+            acc,
+            constant,
+        )
     });
 
-    // if lin_comb_with_last.ty != Some(output_type.clone()) {
-    //     lin_comb_with_last = builder.cast(output_type.clone(), lin_comb_with_last);
-    // }
-
+    // Clamp with zero (same logic as your original code)
     let clamp_with_zero_name = Ident::with_dummy_span(Symbol::intern("clamp_with_zero"));
 
-    let clamp_with_zero_type;
-    if output_type == TyKind::Int || output_type ==TyKind::UInt
-    {
-        clamp_with_zero_type = TyKind::UInt;
+    let clamp_with_zero_type = if signed_output_type == TyKind::Int || signed_output_type == TyKind::UInt {
+        TyKind::UInt
     } else {
-        clamp_with_zero_type = TyKind::UReal;
-    }
+        TyKind::UReal
+    };
+
     let mut final_expr = Shared::new(ExprData {
-        kind: ExprKind::Call(clamp_with_zero_name, vec![lin_comb_with_last.clone()]),
+        kind: ExprKind::Call(clamp_with_zero_name, vec![poly_with_const.clone()]),
         ty: Some(clamp_with_zero_type),
         span: Span::dummy_span(),
     });
@@ -78,6 +143,7 @@ fn build_linear_combination(
 
     final_expr
 }
+
 pub fn collect_relevant_bool_conditions(
     synth_val: &uninterpreted::FuncEntry,
     vc_expr: &Expr,
@@ -278,10 +344,16 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
     ctx: &'ctx z3::Context,
     declare_template_var: &mut dyn FnMut(String) -> decl::VarDecl,
     program_var_decls: &[VarDecl],
-    output_type: TyKind,
+    signed_output_type: TyKind,
+    output_type: &TyKind
 ) -> (Expr, usize) {
     let mut final_expr: Option<Expr> = None;
 
+    let clamp_with_zero_type = if signed_output_type == TyKind::Int || signed_output_type == TyKind::UInt {
+        TyKind::UInt
+    } else {
+        TyKind::UReal
+    };
     let mut num_sat_checks = 0;
     for (i_idx, iv_prod) in collected_guards.iter().enumerate() {
         for (s_idx, split) in split_conditions.iter().enumerate() {
@@ -301,27 +373,29 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
             num_sat_checks = num_sat_checks + 1;
             if prover.check_sat() == SatResult::Sat {
                 let iverson_both =
-                    builder.unary(UnOpKind::Iverson, Some(output_type.clone()), both);
+                    builder.unary(UnOpKind::Iverson, Some(clamp_with_zero_type.clone()), both);
 
                 // Pass precomputed program_var_decls
                 let lc_name = format!("{}_{}", i_idx, s_idx);
-                let lc = build_linear_combination(
+                let lc = build_polynomial_combination(
                     lc_name,
                     synth_name,
                     builder,
                     tcx,
                     declare_template_var,
                     program_var_decls,
-                    output_type.clone(),
+                    signed_output_type.clone(),
+                    output_type,
+                    2
                 );
 
                 let full =
-                    builder.binary(BinOpKind::Mul, Some(output_type.clone()), iverson_both, lc);
+                    builder.binary(BinOpKind::Mul, Some(clamp_with_zero_type.clone()), iverson_both, lc);
 
                 final_expr = Some(match final_expr {
                     None => full,
                     Some(acc) => {
-                        builder.binary(BinOpKind::Add, Some(output_type.clone()), acc, full)
+                        builder.binary(BinOpKind::Add, Some(clamp_with_zero_type.clone()), acc, full)
                     }
                 });
             }
@@ -346,6 +420,13 @@ pub fn build_template_expression<'smt, 'ctx>(
         output_type = func_ref.borrow().output.clone();
     }
 
+    // let signed_output_type = if output_type == TyKind::UInt {
+    //     TyKind::Int
+    // } else {
+    //     TyKind::Real
+    // };
+    let signed_output_type = output_type.clone();
+
     // Storage for all newly created template parameter identifiers
     let mut template_idents: Vec<Ident> = Vec::new();
     let mut num_sat_checks = 0;
@@ -362,9 +443,10 @@ pub fn build_template_expression<'smt, 'ctx>(
             let raw = builder.var(vardecl.name, tcx);
 
             let mut casted = raw.clone();
-            if vardecl.ty != output_type {
-                casted = builder.cast(output_type.clone(), raw.clone());
+            if vardecl.ty != signed_output_type {
+                casted = builder.cast(signed_output_type.clone(), raw.clone());
             }
+            println!("Created pvar {} of type {:?}", casted, casted.ty);
             program_var_decls.push(vardecl);
             program_vars.push(casted);
             program_vars_no_cast.push(raw);
@@ -377,7 +459,7 @@ pub fn build_template_expression<'smt, 'ctx>(
         let ident = Ident::with_dummy_span(Symbol::intern(&full_name));
         let decl = VarDecl {
             name: ident,
-            ty: output_type.clone(),
+            ty: signed_output_type.clone(),
             kind: VarKind::Input,
             init: None,
             span: Span::dummy_span(),
@@ -440,7 +522,8 @@ pub fn build_template_expression<'smt, 'ctx>(
         ctx,
         &mut declare_template_var,
         &program_var_decls,
-        output_type.clone(),
+        signed_output_type.clone(),
+        &output_type
     );
     num_sat_checks = num_sat_checks + temp_sat_checks;
 
