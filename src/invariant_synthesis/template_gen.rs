@@ -4,14 +4,11 @@ use z3rro::prover::{IncrementalMode, Prover};
 
 use crate::{
     ast::{
-        decl, util::FreeVariableCollector, BinOpKind, DeclKind, DeclRef, Expr, ExprBuilder,
-        ExprData, ExprKind, Ident, Range, Shared, Span, Symbol, TyKind, UnOpKind, VarDecl, VarKind,
-    },
-    smt::{
+        BinOpKind, DeclKind, DeclRef, Expr, ExprBuilder, ExprData, ExprKind, Ident, Range, Shared, Span, Symbol, TyKind, UnOpKind, VarDecl, VarKind, decl, util::FreeVariableCollector
+    }, driver::commands::verify::VerifyCommand, smt::{
         translate_exprs::TranslateExprs,
         uninterpreted::{self, Uninterpreteds},
-    },
-    tyctx::TyCtx,
+    }, tyctx::TyCtx
 };
 use std::collections::{HashMap, HashSet};
 
@@ -50,7 +47,7 @@ fn multiply_all(
             f.clone(),
         );
     }
-    println!("created multiplication {acc:?}");
+    // println!("created multiplication {acc:?}");
     acc
 }
 
@@ -345,7 +342,8 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
     declare_template_var: &mut dyn FnMut(String) -> decl::VarDecl,
     program_var_decls: &[VarDecl],
     signed_output_type: TyKind,
-    output_type: &TyKind
+    output_type: &TyKind,
+    max_degree: usize
 ) -> (Expr, usize) {
     let mut final_expr: Option<Expr> = None;
 
@@ -386,7 +384,7 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
                     program_var_decls,
                     signed_output_type.clone(),
                     output_type,
-                    2
+                    max_degree
                 );
 
                 let full =
@@ -406,6 +404,7 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
 }
 
 pub fn build_template_expression<'smt, 'ctx>(
+    options: &VerifyCommand,
     synth_name: &Ident,
     synth_val: &uninterpreted::FuncEntry,
     vc_expr: &Expr,
@@ -446,7 +445,7 @@ pub fn build_template_expression<'smt, 'ctx>(
             if vardecl.ty != signed_output_type {
                 casted = builder.cast(signed_output_type.clone(), raw.clone());
             }
-            println!("Created pvar {} of type {:?}", casted, casted.ty);
+            // println!("Created pvar {} of type {:?}", casted, casted.ty);
             program_var_decls.push(vardecl);
             program_vars.push(casted);
             program_vars_no_cast.push(raw);
@@ -523,7 +522,8 @@ pub fn build_template_expression<'smt, 'ctx>(
         &mut declare_template_var,
         &program_var_decls,
         signed_output_type.clone(),
-        &output_type
+        &output_type,
+        options.synth_options.max_degree.unwrap_or(1)
     );
     num_sat_checks = num_sat_checks + temp_sat_checks;
 

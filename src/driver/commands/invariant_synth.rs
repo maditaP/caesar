@@ -252,6 +252,7 @@ fn synth_inv_main(
                     // Build template for this particular synthesized function
                     let (temp_template, vars, temp_num_guards, temp_num_sat_checks) =
                         build_template_expression(
+                            options,
                             synth_name,
                             synth_val,
                             &vc_expr.expr,
@@ -293,8 +294,8 @@ fn synth_inv_main(
                     //     NeutralsRemover::new(limits_ref.clone(), &smt_ctx_local);
                     // neutrals_remover.visit_expr(&mut tpl)?;
 
-                    println!("template for `{}`: {:?}", synth_name, tpl);
-                    // println!("template for `{}`: {}", synth_name, remove_casts(&tpl));
+                    // println!("template for `{}`: {:?}", synth_name, tpl);
+                    println!("template for `{}`: {}", synth_name, remove_casts(&tpl));
 
                     // Store the processed template
                     templates.push((synth_name.clone(), tpl, temp_num_guards));

@@ -395,3 +395,15 @@ pub enum SliceVerifyMethod {
     #[value(name = "exists-forall")]
     ExistsForall,
 }
+
+
+
+
+#[derive(Debug, Default, Clone, Args)]
+#[command(next_help_heading = "Synthesizer Options")]
+pub struct SynthesizerOptions {
+    
+    /// To indicate what degree polynomial should be generated as a template
+    #[arg(long)]
+    pub max_degree: Option<usize>,
+}

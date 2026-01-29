@@ -11,18 +11,18 @@ use crate::{
             model_check::run_model_checking,
             options::{
                 DebugOptions, InputOptions, LanguageServerOptions, ModelCheckingOptions,
-                OptimizationOptions, ResourceLimitOptions, SliceOptions,
+                OptimizationOptions, ResourceLimitOptions, SliceOptions, SynthesizerOptions,
             },
             print_timings,
         },
-        core_verify::{lower_core_verify_task, CoreVerifyTask},
-        error::{finalize_caesar_result, CaesarError},
+        core_verify::{CoreVerifyTask, lower_core_verify_task},
+        error::{CaesarError, finalize_caesar_result},
         front::parse_and_tycheck,
         item::Item,
         quant_proof::lower_quant_prove_task,
         smt_proof::{run_smt_prove_task, set_global_z3_params},
     },
-    resource_limits::{await_with_resource_limits, LimitError, LimitsRef},
+    resource_limits::{LimitError, LimitsRef, await_with_resource_limits},
     servers::{Server, SharedServer},
 };
 
@@ -48,6 +48,9 @@ pub struct VerifyCommand {
 
     #[command(flatten)]
     pub debug_options: DebugOptions,
+    
+    #[command(flatten)]
+    pub synth_options: SynthesizerOptions,
 }
 
 pub async fn run_verify_command(options: VerifyCommand) -> ExitCode {
