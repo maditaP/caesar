@@ -235,7 +235,6 @@ pub fn get_model_for_constraints<'smt, 'ctx, 'tcx: 'ctx>(
     // vs. add_provable, which would negate it first.
     prover.add_assumption(&constraints_prove_task.vc);
 
-    println!("assertions where added");
     // Run solver & retrieve model if available
     prover.check_sat();
     let model = prover.get_model();

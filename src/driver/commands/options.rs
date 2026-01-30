@@ -406,4 +406,16 @@ pub struct SynthesizerOptions {
     /// To indicate what degree polynomial should be generated as a template
     #[arg(long)]
     pub max_degree: Option<usize>,
+
+     /// Print benchmark info
+    #[arg(long)]
+    pub print_benchmark_info: bool,
+
+     /// Print cegis info
+    #[arg(long)]
+    pub print_cegis_info: bool,
+
+    /// Print template
+    #[arg(long)]
+    pub print_template: bool,
 }

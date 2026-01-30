@@ -413,7 +413,7 @@ pub fn build_template_expression<'smt, 'ctx>(
     split_count: usize,
     translate: &mut TranslateExprs<'smt, 'ctx>,
     ctx: &'ctx z3::Context,
-) -> (Expr, Vec<Ident>, usize, usize) {
+) -> (Expr, Vec<(Ident, TyKind)>, usize, usize) {
     let mut output_type = TyKind::EUReal;
     if let Some(DeclKind::FuncDecl(func_ref)) = tcx.get(*synth_name).as_deref() {
         output_type = func_ref.borrow().output.clone();
@@ -427,7 +427,7 @@ pub fn build_template_expression<'smt, 'ctx>(
     let signed_output_type = output_type.clone();
 
     // Storage for all newly created template parameter identifiers
-    let mut template_idents: Vec<Ident> = Vec::new();
+    let mut template_idents: Vec<(Ident, TyKind)> = Vec::new();
     let mut num_sat_checks = 0;
 
     let mut program_var_decls = Vec::new();
@@ -466,7 +466,7 @@ pub fn build_template_expression<'smt, 'ctx>(
             range: None,
         };
         tcx.declare(crate::ast::DeclKind::VarDecl(DeclRef::new(decl.clone())));
-        template_idents.push(decl.name);
+        template_idents.push((decl.name, signed_output_type.clone()));
         decl
     };
 
