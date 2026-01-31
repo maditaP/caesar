@@ -4,13 +4,17 @@ use z3rro::prover::{IncrementalMode, Prover};
 
 use crate::{
     ast::{
-        BinOpKind, DeclKind, DeclRef, Expr, ExprBuilder, ExprData, ExprKind, Ident, Range, Shared, Span, Symbol, TyKind, UnOpKind, VarDecl, VarKind, decl, util::FreeVariableCollector
-    }, driver::commands::verify::VerifyCommand, smt::{
+        decl, util::FreeVariableCollector, BinOpKind, DeclKind, DeclRef, Expr, ExprBuilder,
+        ExprData, ExprKind, Ident, Range, Shared, Span, Symbol, TyKind, UnOpKind, VarDecl, VarKind,
+    },
+    driver::commands::verify::VerifyCommand,
+    smt::{
         translate_exprs::TranslateExprs,
         uninterpreted::{self, Uninterpreteds},
-    }, tyctx::TyCtx
+    },
+    tyctx::TyCtx,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
 
 // Helper: generate all monomials of given degree (combinations with repetition)
 fn gen_monomials(
@@ -33,19 +37,10 @@ fn gen_monomials(
 }
 
 // Helper: multiply all expressions in a slice
-fn multiply_all(
-    builder: &ExprBuilder,
-    output_type: &TyKind,
-    factors: &[Expr],
-) -> Expr {
+fn multiply_all(builder: &ExprBuilder, output_type: &TyKind, factors: &[Expr]) -> Expr {
     let mut acc = factors[0].clone();
     for f in &factors[1..] {
-        acc = builder.binary(
-            BinOpKind::Mul,
-            Some(output_type.clone()),
-            acc,
-            f.clone(),
-        );
+        acc = builder.binary(BinOpKind::Mul, Some(output_type.clone()), acc, f.clone());
     }
     // println!("created multiplication {acc:?}");
     acc
@@ -85,9 +80,7 @@ fn build_polynomial_combination(
         for (idx, mono) in monomials.into_iter().enumerate() {
             let prod = multiply_all(builder, &signed_output_type, &mono);
 
-            let coeff_name = format!(
-                "tvar_{synth_name}_{name_addon}_deg{degree}_m{idx}"
-            );
+            let coeff_name = format!("tvar_{synth_name}_{name_addon}_deg{degree}_m{idx}");
             let coeff_decl = declare_template_var(coeff_name);
             let coeff = builder.var(coeff_decl.name, tcx);
 
@@ -105,9 +98,7 @@ fn build_polynomial_combination(
     }
 
     // Add constant term (degree 0)
-    let const_decl = declare_template_var(format!(
-        "tvar_{synth_name}_{name_addon}_const"
-    ));
+    let const_decl = declare_template_var(format!("tvar_{synth_name}_{name_addon}_const"));
     let constant = builder.var(const_decl.name, tcx);
 
     let poly_with_const = poly.map_or(constant.clone(), |acc| {
@@ -122,11 +113,12 @@ fn build_polynomial_combination(
     // Clamp with zero (same logic as your original code)
     let clamp_with_zero_name = Ident::with_dummy_span(Symbol::intern("clamp_with_zero"));
 
-    let clamp_with_zero_type = if signed_output_type == TyKind::Int || signed_output_type == TyKind::UInt {
-        TyKind::UInt
-    } else {
-        TyKind::UReal
-    };
+    let clamp_with_zero_type =
+        if signed_output_type == TyKind::Int || signed_output_type == TyKind::UInt {
+            TyKind::UInt
+        } else {
+            TyKind::UReal
+        };
 
     let mut final_expr = Shared::new(ExprData {
         kind: ExprKind::Call(clamp_with_zero_name, vec![poly_with_const.clone()]),
@@ -140,27 +132,44 @@ fn build_polynomial_combination(
 
     final_expr
 }
-
 pub fn collect_relevant_bool_conditions(
     synth_val: &uninterpreted::FuncEntry,
     vc_expr: &Expr,
-) -> Vec<Expr> {
-    let mut allowed_vars = HashSet::new();
+) -> (Vec<Expr>, HashMap<Ident, Ident>) {
+    // Map from variable name → allowed Ident (vardecl.name)
+    let mut allowed_vars: HashMap<Symbol, Ident> = HashMap::new();
 
     for param in &synth_val.inputs.node {
         let vardecl = VarDecl::from_param(param, VarKind::Input)
             .try_unwrap()
             .unwrap();
-        allowed_vars.insert(vardecl.name.name);
+        allowed_vars.insert(vardecl.name.name.clone(), vardecl.name.clone());
     }
 
-    collect_bool_conditions(vc_expr)
+    // actually I should search for declarations or something else here, to get the
+    // program variables
+    let mut var_mapping: HashMap<Ident, Ident> = HashMap::new();
+
+    let bools = collect_bool_conditions(vc_expr)
         .into_iter()
         .filter(|b| {
             let vars = collect_program_vars(b);
-            vars.iter().all(|id| allowed_vars.contains(&id.name))
+
+            vars.iter().all(|id| {
+                if let Some(allowed_ident) = allowed_vars.get(&id.name) {
+                    // allowed var (vardecl.name) → program var (id)
+                    var_mapping
+                        .entry(allowed_ident.clone())
+                        .or_insert_with(|| id.clone());
+                    true
+                } else {
+                    false
+                }
+            })
         })
-        .collect()
+        .collect();
+
+    (bools, var_mapping)
 }
 
 fn collect_program_vars(expr: &Expr) -> indexmap::IndexSet<Ident> {
@@ -171,65 +180,108 @@ fn collect_program_vars(expr: &Expr) -> indexmap::IndexSet<Ident> {
 
     vars
 }
+
+/// Construct Boolean predicates that partition each ranged variable into
+/// a fixed number of contiguous regions, then take the Cartesian product
+/// across variables.
+///
+/// Each variable is split into `split_count` intervals over its numeric range. 
+/// ([lower_bound,upper_bound])
+/// For each interval we generate a predicate of the form:
+///
+///     (var > lower_cut) && (var <= upper_cut)
+/// 
+/// To not exclude var = lower_bound we also include the "interval" var = lower_bound
+/// The final result is the conjunction of one region predicate per variable,
+/// enumerated via a Cartesian product.
 pub fn get_fix_region_splits<'ctx>(
-    ranged_vars: &[(Expr, Range)], // precomputed program variables + ranges
-    split_count: usize,
+    ranged_vars: &[(Expr, Range)], // program variables with precomputed numeric ranges
+    split_count: usize,            // number of uniform splits per variable
     builder: &mut ExprBuilder,
 ) -> Vec<Expr> {
-    let mut region_conditions = Vec::new();
-
+    // Trivial case:
+    //  - no variables, or
+    //  - zero requested splits
+    //
+    // In both cases, return a single unconstrained region (true).
     if ranged_vars.is_empty() || split_count == 0 {
-        region_conditions.push(builder.bool_lit(true));
-        return region_conditions;
+        return vec![builder.bool_lit(true)];
     }
 
-    let mut per_var_regions: Vec<Vec<Expr>> = Vec::new();
+    // For each variable, build a list of mutually exclusive region predicates.
+    let mut per_var_conditions: Vec<Vec<Expr>> = Vec::new();
 
-    for (pv, range) in ranged_vars {
-        let l = BigRational::from_integer(BigInt::from(range.lower));
-        let u = BigRational::from_integer(BigInt::from(range.upper));
-        let width = &u - &l;
+    for (var, range) in ranged_vars {
+        // Convert integer bounds into rationals so we can compute fractional cuts.
+        let lower = BigRational::from_integer(BigInt::from(range.lower));
+        let upper = BigRational::from_integer(BigInt::from(range.upper));
+        let width = &upper - &lower;
 
-        let mut regions_for_this_var = Vec::new();
+        // All interval arithmetic is done in the Real domain.
+        let real_var = if var.ty.clone().unwrap() == TyKind::Real {
+            var.clone()
+        } else {
+            builder.cast(TyKind::Real, var.clone())
+        };
 
-        for i in 1..=(split_count + 1) {
-            let pred = if i == 1 {
-                let ratio = BigRational::new(i.into(), split_count.into());
-                let cut_val = &l + &width * ratio;
-                let cut_expr = builder.signed_frac_lit(cut_val);
-                let mut potentially_casted = pv.clone();
-                if pv.ty.clone().unwrap() != TyKind::Real {
-                    potentially_casted = builder.cast(TyKind::Real, pv.clone())
-                }
-                builder.binary(
-                    BinOpKind::Le,
-                    Some(TyKind::Bool),
-                    potentially_casted,
-                    cut_expr,
-                )
-            } else {
-                let ratio = BigRational::new((i - 1).into(), split_count.into());
-                let cut_val = &l + &width * ratio;
-                let cut_expr = builder.signed_frac_lit(cut_val);
-                let mut potentially_casted = pv.clone();
-                if pv.ty.clone().unwrap() != TyKind::Real {
-                    potentially_casted = builder.cast(TyKind::Real, pv.clone())
-                }
-                builder.binary(
-                    BinOpKind::Gt,
-                    Some(TyKind::Bool),
-                    potentially_casted,
-                    cut_expr,
-                )
-            };
-            regions_for_this_var.push(pred);
+        // Region predicates corresponding to this single variable.
+        let mut conditions_for_var = Vec::new();
+
+        // Generate `split_count` contiguous intervals over [lower, upper].
+        //
+        // Interval i corresponds to:
+        //   (lower + i/split_count * width,
+        //    lower + (i+1)/split_count * width]
+        //
+        for i in 0..split_count {
+            let lower_ratio = BigRational::new(i.into(), split_count.into());
+            let upper_ratio = BigRational::new((i + 1).into(), split_count.into());
+
+            let lower_cut = &lower + &width * lower_ratio;
+            let upper_cut = &lower + &width * upper_ratio;
+
+            let lower_expr = builder.signed_frac_lit(lower_cut);
+            let upper_expr = builder.signed_frac_lit(upper_cut);
+
+            let gt_lower = builder.binary(
+                BinOpKind::Gt,
+                Some(TyKind::Bool),
+                real_var.clone(),
+                lower_expr,
+            );
+
+            let le_upper = builder.binary(
+                BinOpKind::Le,
+                Some(TyKind::Bool),
+                real_var.clone(),
+                upper_expr,
+            );
+
+            let interval_pred =
+                builder.binary(BinOpKind::And, Some(TyKind::Bool), gt_lower, le_upper);
+
+            conditions_for_var.push(interval_pred);
         }
 
-        per_var_regions.push(regions_for_this_var);
+        //   var == lower
+        let lower_eq = builder.binary(
+            BinOpKind::Eq,
+            Some(TyKind::Bool),
+            real_var.clone(),
+            builder.signed_frac_lit(lower),
+        );
+
+        conditions_for_var.push(lower_eq);
+
+        // Store all regions for this variable.
+        per_var_conditions.push(conditions_for_var);
     }
 
-    cartesian_and(&per_var_regions, builder)
+    // Combine per-variable region predicates into full region conditions
+    // by taking the Cartesian product and conjoining each combination.
+    cartesian_and(&per_var_conditions, builder)
 }
+
 
 fn cartesian_and(lists: &[Vec<Expr>], builder: &ExprBuilder) -> Vec<Expr> {
     // Start with a single empty conjunction
@@ -257,79 +309,6 @@ fn cartesian_and(lists: &[Vec<Expr>], builder: &ExprBuilder) -> Vec<Expr> {
     acc
 }
 
-pub fn _get_variable_region_splits<'ctx>(
-    program_vars: &[Expr], // precomputed builder variables
-    split_count: usize,
-    builder: &mut ExprBuilder,
-    tcx: &TyCtx,
-    declare_template_var: &mut dyn FnMut(String) -> decl::VarDecl,
-) -> Vec<Expr> {
-    let mut threshold_vars = Vec::<Vec<Expr>>::new();
-    for (i, _) in program_vars.iter().enumerate() {
-        let mut cuts = Vec::new();
-        for j in 0..split_count {
-            let name = format!("split_threshold_{}_{}", i, j);
-            let decl = declare_template_var(name);
-            let t = builder.var(decl.name, tcx);
-            cuts.push(t);
-        }
-        threshold_vars.push(cuts);
-    }
-
-    if program_vars.is_empty() || split_count == 0 {
-        return vec![builder.bool_lit(true)];
-    }
-
-    let n = program_vars.len();
-    let regions_per_var = split_count + 1;
-    let total_regions = regions_per_var.pow(n as u32);
-
-    let mut region_conditions = Vec::new();
-
-    for region_index in 0..total_regions {
-        let mut cond = builder.bool_lit(true);
-        let mut idx = region_index;
-
-        for var_i in 0..n {
-            let reg = idx % regions_per_var;
-            idx /= regions_per_var;
-
-            let mut pv = program_vars[var_i].clone();
-            let cuts = &threshold_vars[var_i];
-
-            if pv.ty.clone().unwrap() != TyKind::Real {
-                pv = builder.cast(TyKind::Real, pv.clone())
-            }
-            let pred = match reg {
-                0 => builder.binary(BinOpKind::Lt, Some(TyKind::Bool), pv, cuts[0].clone()),
-                r if r == regions_per_var - 1 => builder.binary(
-                    BinOpKind::Ge,
-                    Some(TyKind::Bool),
-                    pv,
-                    cuts.last().unwrap().clone(),
-                ),
-                r => {
-                    let ge_prev = builder.binary(
-                        BinOpKind::Ge,
-                        Some(TyKind::Bool),
-                        pv.clone(),
-                        cuts[r - 1].clone(),
-                    );
-                    let lt_next =
-                        builder.binary(BinOpKind::Lt, Some(TyKind::Bool), pv, cuts[r].clone());
-                    builder.binary(BinOpKind::And, Some(TyKind::Bool), ge_prev, lt_next)
-                }
-            };
-
-            cond = builder.binary(BinOpKind::And, Some(TyKind::Bool), cond, pred);
-        }
-
-        region_conditions.push(cond);
-    }
-
-    region_conditions
-}
-
 // Creates the expression (collected_guards x split_conditions) * lc
 pub fn assemble_piecewise_expression<'smt, 'ctx>(
     synth_name: &Ident,
@@ -343,15 +322,16 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
     program_var_decls: &[VarDecl],
     signed_output_type: TyKind,
     output_type: &TyKind,
-    max_degree: usize
+    max_degree: usize,
 ) -> (Expr, usize) {
     let mut final_expr: Option<Expr> = None;
 
-    let clamp_with_zero_type = if signed_output_type == TyKind::Int || signed_output_type == TyKind::UInt {
-        TyKind::UInt
-    } else {
-        TyKind::UReal
-    };
+    let clamp_with_zero_type =
+        if signed_output_type == TyKind::Int || signed_output_type == TyKind::UInt {
+            TyKind::UInt
+        } else {
+            TyKind::UReal
+        };
     let mut num_sat_checks = 0;
     for (i_idx, iv_prod) in collected_guards.iter().enumerate() {
         for (s_idx, split) in split_conditions.iter().enumerate() {
@@ -364,6 +344,10 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
 
             // Check satisfiability of guard && split_condition, since this is a short formula
             // and if it is not sat we don't have to add the lc
+            // The problem here is that those are not the same variables right?
+            // The split variables are the actual function paramters,
+            // whereas the other ones are the caller parameter
+            // I think this is where the real problem lies
             let expr_z3 = translate.t_bool(&both);
             let mut prover = Prover::new(&ctx, IncrementalMode::Native);
             prover.add_assumption(&expr_z3);
@@ -384,17 +368,24 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
                     program_var_decls,
                     signed_output_type.clone(),
                     output_type,
-                    max_degree
+                    max_degree,
                 );
 
-                let full =
-                    builder.binary(BinOpKind::Mul, Some(clamp_with_zero_type.clone()), iverson_both, lc);
+                let full = builder.binary(
+                    BinOpKind::Mul,
+                    Some(clamp_with_zero_type.clone()),
+                    iverson_both,
+                    lc,
+                );
 
                 final_expr = Some(match final_expr {
                     None => full,
-                    Some(acc) => {
-                        builder.binary(BinOpKind::Add, Some(clamp_with_zero_type.clone()), acc, full)
-                    }
+                    Some(acc) => builder.binary(
+                        BinOpKind::Add,
+                        Some(clamp_with_zero_type.clone()),
+                        acc,
+                        full,
+                    ),
                 });
             }
         }
@@ -419,6 +410,7 @@ pub fn build_template_expression<'smt, 'ctx>(
         output_type = func_ref.borrow().output.clone();
     }
 
+    // TODO make it optional, whether the variables are typed or not
     // let signed_output_type = if output_type == TyKind::UInt {
     //     TyKind::Int
     // } else {
@@ -471,9 +463,10 @@ pub fn build_template_expression<'smt, 'ctx>(
     };
 
     let mut bool_exprs: Vec<Shared<ExprData>> = [].into();
+    let mut var_map = [].into();
     // Step 1: Collect Boolean conditions relevant to the inputs
     if split_count >= 1 {
-        bool_exprs = collect_relevant_bool_conditions(synth_val, vc_expr);
+        (bool_exprs, var_map) = collect_relevant_bool_conditions(synth_val, vc_expr);
     }
 
     if bool_exprs.is_empty() {
@@ -484,9 +477,9 @@ pub fn build_template_expression<'smt, 'ctx>(
     let ranged_vars: Vec<(Expr, Range)> = program_var_decls
         .iter()
         .filter_map(|v| {
-            v.range
-                .as_ref()
-                .map(|r| (builder.var(v.name, tcx), r.clone()))
+            let r = v.range.as_ref()?;
+            let mapped = var_map.get(&v.name)?;
+            Some((builder.var(mapped.clone(), tcx), r.clone()))
         })
         .collect();
 
@@ -523,7 +516,7 @@ pub fn build_template_expression<'smt, 'ctx>(
         &program_var_decls,
         signed_output_type.clone(),
         &output_type,
-        options.synth_options.max_degree.unwrap_or(1)
+        options.synth_options.max_degree.unwrap_or(1),
     );
     num_sat_checks = num_sat_checks + temp_sat_checks;
 

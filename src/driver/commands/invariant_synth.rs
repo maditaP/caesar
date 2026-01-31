@@ -9,6 +9,7 @@ use crate::invariant_synthesis::inv_synth_helpers::{
     subst_from_mapping, FunctionInliner, InsertAssumeBeforeCalls,
 };
 use crate::invariant_synthesis::template_gen::{build_template_expression, get_synth_functions};
+use crate::opt::remove_neutrals::NeutralsRemover;
 use crate::opt::unfolder::Unfolder;
 use crate::smt::funcs::axiomatic::AxiomaticFunctionEncoder;
 use crate::{
@@ -104,11 +105,12 @@ fn synth_inv_main(
     let mut num_failures: usize = 0;
     let mut total_num_cegis_its = 0;
     const MAX_CEGIS_ITERS: usize = 3000;
-    const MAX_SPLIT_COUNT: usize = 3;
+    const MAX_SPLIT_COUNT: usize = 30;
     let mut template_satchecks = 0;
     let mut duration_template_building = Duration::new(0, 0);
 
     while split_count <= MAX_SPLIT_COUNT {
+        println!("Iteration {split_count}");
         // I have to reset the tcx, how do I do that without parsing new?
         let start_parse = Instant::now();
 
@@ -355,10 +357,23 @@ fn synth_inv_main(
                 );
 
                 if options.synth_options.print_cegis_info {
-                    println!("mapping used:");
-                    for (key, val) in &zero_extended_mapping {
-                        println!("{key} -> {val}");
-                    }
+                    for (synth_name, template_expr, _num_guards) in templates.iter() {
+                            let instantiated =
+                                subst_from_mapping(zero_extended_mapping.clone(), template_expr);
+
+                            let mut task = QuantVcProveTask {
+                                expr: instantiated,
+                                direction,
+                                deps: vcdeps.clone(),
+                            };
+
+                            task.unfold(options, &limits_ref, &tcx)?;
+                            task.remove_neutrals(&limits_ref, &tcx)?; // TODO these need to be counted
+                            println!("");
+                            println!("instantiated template");
+                            println!("{} := {}", synth_name, remove_casts(&task.expr));
+                            println!("");
+                        }
                 }
 
                 // Rebuild a new Boolean task with the updated formula
@@ -376,7 +391,6 @@ fn synth_inv_main(
                 // Translate again to SMT form
                 vc_pvars = SmtVcProveTask::translate(refined_vc, &mut translate);
 
-                // println!("finding counterexample for {}", vc_pvars.quant_vc.expr);
 
                 let result = vc_pvars.clone().run_solver(
                     options,
@@ -420,6 +434,9 @@ fn synth_inv_main(
                         let duration_inductivity = start_total.elapsed();
 
                         if options.synth_options.print_benchmark_info {
+                            println!("");
+                            println!("=== Benchmark info ===");
+
                             println!(
                                 "Total synthesis took: {:.2}",
                                 duration_inductivity.as_secs_f64()
@@ -441,6 +458,8 @@ fn synth_inv_main(
                             println!(
                                 "Number of sat checks in template building {template_satchecks}"
                             );
+                            println!("=======================");
+                            println!("");
                         }
 
                         split_count = MAX_SPLIT_COUNT + 1;
@@ -479,8 +498,11 @@ fn synth_inv_main(
                     if options.synth_options.print_cegis_info {
                         println!("Found counterexample: ");
                         for (ident, expr) in &mapping {
-                            println!("{ident} -> {expr}");
+                            if !template_idents.contains(ident) {
+                                println!("{} -> {expr}", ident.name); // TODO this is not understandable
+                            }
                         }
+                        println!("");
                     }
 
                     let filtered_mapping: HashMap<Ident, Expr> = mapping
