@@ -418,4 +418,8 @@ pub struct SynthesizerOptions {
     /// Print template
     #[arg(long)]
     pub print_template: bool,
+
+     /// Use unsigned coefficients in template
+    #[arg(long)]
+    pub unsigned_coefficients: bool,
 }

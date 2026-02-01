@@ -14,7 +14,7 @@ use crate::{
     },
     tyctx::TyCtx,
 };
-use std::collections::{HashMap};
+use std::collections::HashMap;
 
 // Helper: generate all monomials of given degree (combinations with repetition)
 fn gen_monomials(
@@ -185,12 +185,12 @@ fn collect_program_vars(expr: &Expr) -> indexmap::IndexSet<Ident> {
 /// a fixed number of contiguous regions, then take the Cartesian product
 /// across variables.
 ///
-/// Each variable is split into `split_count` intervals over its numeric range. 
+/// Each variable is split into `split_count` intervals over its numeric range.
 /// ([lower_bound,upper_bound])
 /// For each interval we generate a predicate of the form:
 ///
 ///     (var > lower_cut) && (var <= upper_cut)
-/// 
+///
 /// To not exclude var = lower_bound we also include the "interval" var = lower_bound
 /// The final result is the conjunction of one region predicate per variable,
 /// enumerated via a Cartesian product.
@@ -281,7 +281,6 @@ pub fn get_fix_region_splits<'ctx>(
     // by taking the Cartesian product and conjoining each combination.
     cartesian_and(&per_var_conditions, builder)
 }
-
 
 fn cartesian_and(lists: &[Vec<Expr>], builder: &ExprBuilder) -> Vec<Expr> {
     // Start with a single empty conjunction
@@ -410,13 +409,15 @@ pub fn build_template_expression<'smt, 'ctx>(
         output_type = func_ref.borrow().output.clone();
     }
 
-    // TODO make it optional, whether the variables are typed or not
-    // let signed_output_type = if output_type == TyKind::UInt {
-    //     TyKind::Int
-    // } else {
-    //     TyKind::Real
-    // };
-    let signed_output_type = output_type.clone();
+    let mut signed_output_type = output_type.clone();
+
+    if !options.synth_options.unsigned_coefficients {
+        signed_output_type = if output_type == TyKind::UInt {
+            TyKind::Int
+        } else {
+            TyKind::Real
+        };
+    }
 
     // Storage for all newly created template parameter identifiers
     let mut template_idents: Vec<(Ident, TyKind)> = Vec::new();
