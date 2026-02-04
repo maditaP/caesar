@@ -9,7 +9,6 @@ use crate::invariant_synthesis::inv_synth_helpers::{
     subst_from_mapping, FunctionInliner, InsertAssumeBeforeCalls,
 };
 use crate::invariant_synthesis::template_gen::{build_template_expression, get_synth_functions};
-use crate::opt::remove_neutrals::NeutralsRemover;
 use crate::opt::unfolder::Unfolder;
 use crate::smt::funcs::axiomatic::AxiomaticFunctionEncoder;
 use crate::{
@@ -105,11 +104,11 @@ fn synth_inv_main(
     let mut num_failures: usize = 0;
     let mut total_num_cegis_its = 0;
     const MAX_CEGIS_ITERS: usize = 3000;
-    const MAX_SPLIT_COUNT: usize = 30;
+    let max_split_count: usize = options.synth_options.max_template_refinements.unwrap_or(30) + 1;
     let mut template_satchecks = 0;
     let mut duration_template_building = Duration::new(0, 0);
 
-    while split_count <= MAX_SPLIT_COUNT {
+    while split_count <= max_split_count {
         println!("Iteration {split_count}");
         // I have to reset the tcx, how do I do that without parsing new?
         let start_parse = Instant::now();
@@ -176,12 +175,18 @@ fn synth_inv_main(
                 func_idents: &target_funcs,
                 direction: Direction::Down, // or whatever is appropriate
             };
-            let Some(mut synth_inv_unit) =
-                // item.flat_map(|unit| CoreVerifyTask::from_source_unit2(unit, &mut depgraph, &mut visitor))
+            let synth_inv_unit = if options.synth_options.only_well_defined {
+                item.flat_map(|unit| {
+                    CoreVerifyTask::from_source_unit2(unit, &mut depgraph, &mut visitor)
+                })
+            } else {
                 item.flat_map(|unit| CoreVerifyTask::from_source_unit(unit, &mut depgraph))
-            else {
+            };
+
+            let Some(mut synth_inv_unit) = synth_inv_unit else {
                 continue;
             };
+
             // --- Phase 0: Create the completely uninstatiated verification condition ---
             limits_ref.check_limits()?;
 
@@ -358,22 +363,22 @@ fn synth_inv_main(
 
                 if options.synth_options.print_cegis_info {
                     for (synth_name, template_expr, _num_guards) in templates.iter() {
-                            let instantiated =
-                                subst_from_mapping(zero_extended_mapping.clone(), template_expr);
+                        let instantiated =
+                            subst_from_mapping(zero_extended_mapping.clone(), template_expr);
 
-                            let mut task = QuantVcProveTask {
-                                expr: instantiated,
-                                direction,
-                                deps: vcdeps.clone(),
-                            };
+                        let mut task = QuantVcProveTask {
+                            expr: instantiated,
+                            direction,
+                            deps: vcdeps.clone(),
+                        };
 
-                            task.unfold(options, &limits_ref, &tcx)?;
-                            task.remove_neutrals(&limits_ref, &tcx)?; // TODO these need to be counted
-                            println!("");
-                            println!("instantiated template");
-                            println!("{} := {}", synth_name, remove_casts(&task.expr));
-                            println!("");
-                        }
+                        task.unfold(options, &limits_ref, &tcx)?;
+                        task.remove_neutrals(&limits_ref, &tcx)?; // TODO these need to be counted
+                        println!("");
+                        println!("instantiated template");
+                        println!("{} := {}", synth_name, remove_casts(&task.expr));
+                        println!("");
+                    }
                 }
 
                 // Rebuild a new Boolean task with the updated formula
@@ -390,7 +395,6 @@ fn synth_inv_main(
                     lower_quant_prove_task(options, &limits_ref, &tcx, name, refined_vc)?;
                 // Translate again to SMT form
                 vc_pvars = SmtVcProveTask::translate(refined_vc, &mut translate);
-
 
                 let result = vc_pvars.clone().run_solver(
                     options,
@@ -462,7 +466,7 @@ fn synth_inv_main(
                             println!("");
                         }
 
-                        split_count = MAX_SPLIT_COUNT + 1;
+                        split_count = max_split_count + 1;
                         println!(
                             "After {iteration} CEGIS loop iterations, the following admissible invariants were found:"
                         );

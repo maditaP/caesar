@@ -328,8 +328,8 @@ impl<'a> InsertAssumeBeforeCalls<'a> {
                 BinOpKind::Le,
                 Some(TyKind::Bool),
                 arg.clone(),
-                builder.binary(BinOpKind::Add, Some(arg.ty.clone().unwrap_or(TyKind::Int)), builder.one_lit(&arg.ty.clone().unwrap_or(TyKind::Int)), builder.one_lit(&arg.ty.clone().unwrap_or(TyKind::Int)))
-                // builder.one_lit(&arg.ty.clone().unwrap_or(TyKind::Int)),
+                // builder.binary(BinOpKind::Add, Some(arg.ty.clone().unwrap_or(TyKind::Int)), builder.one_lit(&arg.ty.clone().unwrap_or(TyKind::Int)), builder.one_lit(&arg.ty.clone().unwrap_or(TyKind::Int)))
+                builder.one_lit(&arg.ty.clone().unwrap_or(TyKind::Int)),
             );
             if self.direction == Direction::Up {
                 le_expr = builder.unary(UnOpKind::Not, Some(TyKind::Bool), le_expr);

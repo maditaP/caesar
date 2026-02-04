@@ -46,6 +46,164 @@ fn multiply_all(builder: &ExprBuilder, output_type: &TyKind, factors: &[Expr]) -
     acc
 }
 
+
+fn build_polynomial(
+    name_addon: &str,
+    synth_name: &Ident,
+    builder: &ExprBuilder,
+    tcx: &TyCtx,
+    declare_template_var: &mut dyn FnMut(String) -> decl::VarDecl,
+    program_var_decls: &[VarDecl],
+    signed_output_type: TyKind,
+    max_degree: usize,
+) -> Expr {
+    let vars: Vec<Expr> = program_var_decls
+        .iter()
+        .map(|vardecl| {
+            let mut v = builder.var(vardecl.name, tcx);
+            if v.ty != Some(signed_output_type.clone()) {
+                v = builder.cast(signed_output_type.clone(), v);
+            }
+            v
+        })
+        .collect();
+
+    let mut poly: Option<Expr> = None;
+
+    for degree in 1..=max_degree {
+        let mut monomials = Vec::new();
+        gen_monomials(&vars, degree, 0, &mut Vec::new(), &mut monomials);
+
+        for (idx, mono) in monomials.into_iter().enumerate() {
+            let prod = multiply_all(builder, &signed_output_type, &mono);
+
+            let coeff_name =
+                format!("tvar_{synth_name}_{name_addon}_deg{degree}_m{idx}");
+            let coeff_decl = declare_template_var(coeff_name);
+            let coeff = builder.var(coeff_decl.name, tcx);
+
+            let term = builder.binary(
+                BinOpKind::Mul,
+                Some(signed_output_type.clone()),
+                coeff,
+                prod,
+            );
+
+            poly = Some(poly.map_or(term.clone(), |acc| {
+                builder.binary(
+                    BinOpKind::Add,
+                    Some(signed_output_type.clone()),
+                    acc,
+                    term,
+                )
+            }));
+        }
+    }
+
+    let const_decl =
+        declare_template_var(format!("tvar_{synth_name}_{name_addon}_const"));
+    let constant = builder.var(const_decl.name, tcx);
+
+    poly.map_or(constant.clone(), |acc| {
+        builder.binary(
+            BinOpKind::Add,
+            Some(signed_output_type.clone()),
+            acc,
+            constant,
+        )
+    })
+}
+
+fn build_rational_combination(
+    name_addon: String,
+    synth_name: &Ident,
+    builder: &ExprBuilder,
+    tcx: &TyCtx,
+    declare_template_var: &mut dyn FnMut(String) -> decl::VarDecl,
+    program_var_decls: &[VarDecl],
+    signed_output_type: TyKind,
+    output_type: &TyKind,
+    max_degree: usize,
+) -> Expr {
+    // Numerator
+    let numerator = build_polynomial(
+        &format!("{name_addon}_num"),
+        synth_name,
+        builder,
+        tcx,
+        declare_template_var,
+        program_var_decls,
+        signed_output_type.clone(),
+        max_degree,
+    );
+    println!("numerator: {numerator}");
+
+    // Denominator polynomial
+    let denom_poly = build_polynomial(
+        &format!("{name_addon}_den"),
+        synth_name,
+        builder,
+        tcx,
+        declare_template_var,
+        program_var_decls,
+        signed_output_type.clone(),
+        max_degree,
+    );
+    println!("denominator: {denom_poly}");
+
+    let denom_pos = builder.ite(Some(signed_output_type.clone()), 
+    builder.binary(BinOpKind::Gt, Some(TyKind::Bool), denom_poly.clone(), builder.zero_lit(&signed_output_type)), denom_poly, builder.one_lit(&signed_output_type));
+    // Enforce denominator > 0 by doing: 1 + abs(denom_poly)
+    // let one = builder.one_lit(&signed_output_type.clone());
+
+    // let abs_name = Ident::with_dummy_span(Symbol::intern("abs"));
+    // let abs_denom = Shared::new(ExprData {
+    //     kind: ExprKind::Call(abs_name, vec![denom_poly]),
+    //     ty: Some(signed_output_type.clone()),
+    //     span: Span::dummy_span(),
+    // });
+
+    // let safe_denom = builder.binary(
+    //     BinOpKind::Add,
+    //     Some(signed_output_type.clone()),
+    //     one,
+    //     abs_denom,
+    // );
+
+    // Division
+    let mut rational = builder.binary(
+        BinOpKind::Div,
+        Some(signed_output_type.clone()),
+        numerator,
+        denom_pos,
+    );
+
+    // Clamp (same logic as polynomial case)
+    let clamp_with_zero_name =
+        Ident::with_dummy_span(Symbol::intern("clamp_with_zero"));
+
+    let clamp_ty =
+        if signed_output_type == TyKind::Int || signed_output_type == TyKind::UInt {
+            TyKind::UInt
+        } else {
+            TyKind::UReal
+        };
+
+
+    rational = Shared::new(ExprData {
+        kind: ExprKind::Call(clamp_with_zero_name, vec![rational]),
+        ty: Some(clamp_ty),
+        span: Span::dummy_span(),
+    });
+
+    if rational.ty != Some(output_type.clone()) {
+        rational = builder.cast(output_type.clone(), rational);
+    }
+
+    rational
+}
+
+
 // Main function: build polynomial template up to max_degree
 fn build_polynomial_combination(
     name_addon: String,
@@ -56,7 +214,7 @@ fn build_polynomial_combination(
     program_var_decls: &[VarDecl],
     signed_output_type: TyKind,
     output_type: &TyKind,
-    max_degree: usize, // <-- NEW
+    max_degree: usize,
 ) -> Expr {
     // Collect program variables as expressions (casted)
     let vars: Vec<Expr> = program_var_decls
@@ -358,6 +516,17 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
 
                 // Pass precomputed program_var_decls
                 let lc_name = format!("{}_{}", i_idx, s_idx);
+                // let lc = build_rational_combination(
+                //     lc_name,
+                //     synth_name,
+                //     builder,
+                //     tcx,
+                //     declare_template_var,
+                //     program_var_decls,
+                //     signed_output_type.clone(),
+                //     output_type,
+                //     max_degree,
+                // );
                 let lc = build_polynomial_combination(
                     lc_name,
                     synth_name,

@@ -422,4 +422,13 @@ pub struct SynthesizerOptions {
      /// Use unsigned coefficients in template
     #[arg(long)]
     pub unsigned_coefficients: bool,
+
+    /// Max number of template refinements
+     #[arg(long)]
+    pub max_template_refinements: Option<usize>,
+
+    /// Ensure well-definedness
+    #[arg(long)]
+    pub only_well_defined: bool,
+
 }
