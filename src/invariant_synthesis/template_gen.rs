@@ -1,20 +1,74 @@
 use num::{BigInt, BigRational};
-use z3::SatResult;
+use z3::{Config, Context, SatResult};
 use z3rro::prover::{IncrementalMode, Prover};
 
 use crate::{
     ast::{
-        decl, util::FreeVariableCollector, BinOpKind, DeclKind, DeclRef, Expr, ExprBuilder,
-        ExprData, ExprKind, Ident, Range, Shared, Span, Symbol, TyKind, UnOpKind, VarDecl, VarKind,
+        decl, util::FreeVariableCollector, visit::VisitorMut, BinOpKind, DeclKind, DeclRef, Expr,
+        ExprBuilder, ExprData, ExprKind, Ident, Range, Shared, Span, Symbol, TyKind, UnOpKind,
+        VarDecl, VarKind,
     },
     driver::commands::verify::VerifyCommand,
+    invariant_synthesis::inv_synth_helpers::subst_from_mapping,
+    opt::unfolder::Unfolder,
+    resource_limits::LimitsRef,
     smt::{
+        funcs::axiomatic::AxiomaticFunctionEncoder,
         translate_exprs::TranslateExprs,
         uninterpreted::{self, Uninterpreteds},
+        DepConfig, SmtCtx,
     },
     tyctx::TyCtx,
 };
 use std::collections::HashMap;
+pub type ArgParamMap = HashMap<*const Expr, Expr>;
+pub type VarToParamMap = HashMap<Ident, Expr>;
+
+pub fn collect_call_var_param_maps(
+    expr: &Expr,
+    target_ident: &Ident,
+    params: &[Expr],
+) -> Vec<VarToParamMap> {
+    let mut out = Vec::new();
+    collect_call_var_param_maps_rec(expr, target_ident, params, &mut out);
+    out
+}
+fn collect_call_var_param_maps_rec(
+    expr: &Expr,
+    target_ident: &Ident,
+    params: &[Expr],
+    out: &mut Vec<VarToParamMap>,
+) {
+    match &expr.kind {
+        ExprKind::Call(func_ident, args) if func_ident.name == target_ident.name => {
+            if args.len() == params.len() {
+                let mut map = HashMap::new();
+
+                for (arg, param) in args.iter().zip(params.iter()) {
+                    if let ExprKind::Var(id) = &arg.kind {
+                        // program var → formal param expr
+                        map.insert(id.clone(), param.clone());
+                    }
+                }
+
+                if !map.is_empty() {
+                    out.push(map);
+                }
+            }
+
+            // Still recurse into arguments
+            for arg in args {
+                collect_call_var_param_maps_rec(arg, target_ident, params, out);
+            }
+        }
+
+        _ => {
+            for child in expr.children() {
+                collect_call_var_param_maps_rec(child, target_ident, params, out);
+            }
+        }
+    }
+}
 
 // Helper: generate all monomials of given degree (combinations with repetition)
 fn gen_monomials(
@@ -46,7 +100,6 @@ fn multiply_all(builder: &ExprBuilder, output_type: &TyKind, factors: &[Expr]) -
     acc
 }
 
-
 fn build_polynomial(
     name_addon: &str,
     synth_name: &Ident,
@@ -77,8 +130,7 @@ fn build_polynomial(
         for (idx, mono) in monomials.into_iter().enumerate() {
             let prod = multiply_all(builder, &signed_output_type, &mono);
 
-            let coeff_name =
-                format!("tvar_{synth_name}_{name_addon}_deg{degree}_m{idx}");
+            let coeff_name = format!("tvar_{synth_name}_{name_addon}_deg{degree}_m{idx}");
             let coeff_decl = declare_template_var(coeff_name);
             let coeff = builder.var(coeff_decl.name, tcx);
 
@@ -90,18 +142,12 @@ fn build_polynomial(
             );
 
             poly = Some(poly.map_or(term.clone(), |acc| {
-                builder.binary(
-                    BinOpKind::Add,
-                    Some(signed_output_type.clone()),
-                    acc,
-                    term,
-                )
+                builder.binary(BinOpKind::Add, Some(signed_output_type.clone()), acc, term)
             }));
         }
     }
 
-    let const_decl =
-        declare_template_var(format!("tvar_{synth_name}_{name_addon}_const"));
+    let const_decl = declare_template_var(format!("tvar_{synth_name}_{name_addon}_const"));
     let constant = builder.var(const_decl.name, tcx);
 
     poly.map_or(constant.clone(), |acc| {
@@ -151,8 +197,17 @@ fn build_rational_combination(
     );
     println!("denominator: {denom_poly}");
 
-    let denom_pos = builder.ite(Some(signed_output_type.clone()), 
-    builder.binary(BinOpKind::Gt, Some(TyKind::Bool), denom_poly.clone(), builder.zero_lit(&signed_output_type)), denom_poly, builder.one_lit(&signed_output_type));
+    let denom_pos = builder.ite(
+        Some(signed_output_type.clone()),
+        builder.binary(
+            BinOpKind::Gt,
+            Some(TyKind::Bool),
+            denom_poly.clone(),
+            builder.zero_lit(&signed_output_type),
+        ),
+        denom_poly,
+        builder.one_lit(&signed_output_type),
+    );
     // Enforce denominator > 0 by doing: 1 + abs(denom_poly)
     // let one = builder.one_lit(&signed_output_type.clone());
 
@@ -179,16 +234,13 @@ fn build_rational_combination(
     );
 
     // Clamp (same logic as polynomial case)
-    let clamp_with_zero_name =
-        Ident::with_dummy_span(Symbol::intern("clamp_with_zero"));
+    let clamp_with_zero_name = Ident::with_dummy_span(Symbol::intern("clamp_with_zero"));
 
-    let clamp_ty =
-        if signed_output_type == TyKind::Int || signed_output_type == TyKind::UInt {
-            TyKind::UInt
-        } else {
-            TyKind::UReal
-        };
-
+    let clamp_ty = if signed_output_type == TyKind::Int || signed_output_type == TyKind::UInt {
+        TyKind::UInt
+    } else {
+        TyKind::UReal
+    };
 
     rational = Shared::new(ExprData {
         kind: ExprKind::Call(clamp_with_zero_name, vec![rational]),
@@ -202,7 +254,6 @@ fn build_rational_combination(
 
     rational
 }
-
 
 // Main function: build polynomial template up to max_degree
 fn build_polynomial_combination(
@@ -278,11 +329,31 @@ fn build_polynomial_combination(
             TyKind::UReal
         };
 
-    let mut final_expr = Shared::new(ExprData {
-        kind: ExprKind::Call(clamp_with_zero_name, vec![poly_with_const.clone()]),
-        ty: Some(clamp_with_zero_type),
-        span: Span::dummy_span(),
-    });
+    let mut final_expr = builder.ite(
+        Some(clamp_with_zero_type.clone()),
+        builder.binary(
+            BinOpKind::Ge,
+            Some(TyKind::Bool),
+            poly_with_const.clone(),
+            builder.zero_lit(&signed_output_type),
+        ),
+        Shared::new(ExprData {
+            kind: ExprKind::Call(clamp_with_zero_name, vec![poly_with_const.clone()]),
+            ty: Some(clamp_with_zero_type.clone()),
+            span: Span::dummy_span(),
+        }),
+        builder.zero_lit(&clamp_with_zero_type),
+    );
+
+    println!("final expr {final_expr}");
+    println!("clamp_with_zero_type {clamp_with_zero_type}");
+    println!("signed_outp {signed_output_type}");
+    println!("poly_with_const_type {:?}", poly_with_const.ty);
+    // let mut final_expr = Shared::new(ExprData {
+    //     kind: ExprKind::Call(clamp_with_zero_name, vec![poly_with_const.clone()]),
+    //     ty: Some(clamp_with_zero_type),
+    //     span: Span::dummy_span(),
+    // });
 
     if final_expr.ty != Some(output_type.clone()) {
         final_expr = builder.cast(output_type.clone(), final_expr);
@@ -291,43 +362,54 @@ fn build_polynomial_combination(
     final_expr
 }
 pub fn collect_relevant_bool_conditions(
-    synth_val: &uninterpreted::FuncEntry,
+    _synth_val: &uninterpreted::FuncEntry,
     vc_expr: &Expr,
+    mappings: Vec<VarToParamMap>,
+    tcx: &TyCtx,
+    limits_ref: LimitsRef,
 ) -> (Vec<Expr>, HashMap<Ident, Ident>) {
-    // Map from variable name → allowed Ident (vardecl.name)
-    let mut allowed_vars: HashMap<Symbol, Ident> = HashMap::new();
+    let mut out = Vec::new();
 
-    for param in &synth_val.inputs.node {
-        let vardecl = VarDecl::from_param(param, VarKind::Input)
-            .try_unwrap()
-            .unwrap();
-        allowed_vars.insert(vardecl.name.name.clone(), vardecl.name.clone());
+    let ctx = Context::new(&Config::default());
+    let dep_config = DepConfig::SpecsOnly;
+    let smt_ctx_local = SmtCtx::new(
+        &ctx,
+        &tcx,
+        Box::new(AxiomaticFunctionEncoder::default()),
+        dep_config,
+    );
+    let mut unfolder = Unfolder::new(limits_ref.clone(), &smt_ctx_local);
+    // param → program var
+    let mut param_var_mapping: HashMap<Ident, Ident> = HashMap::new();
+
+    'bools: for b in collect_bool_conditions(vc_expr) {
+        let vars = collect_program_vars(&b);
+
+        // Try to explain this boolean via one call-site mapping
+        for mapping in &mappings {
+            // All vars must be mapped
+            if vars.iter().all(|v| mapping.contains_key(v)) {
+                // Wrap boolean in substitutions
+                let mut wrapped = subst_from_mapping(mapping.clone(), &b);
+                let _ = unfolder.visit_expr(&mut wrapped);
+
+                out.push(wrapped);
+
+                // Record param → program var info
+                for (prog_var, param_expr) in mapping {
+                    if let ExprKind::Var(param_id) = &param_expr.kind {
+                        param_var_mapping
+                            .entry(param_id.clone())
+                            .or_insert_with(|| prog_var.clone());
+                    }
+                }
+
+                continue 'bools;
+            }
+        }
     }
 
-    // actually I should search for declarations or something else here, to get the
-    // program variables
-    let mut var_mapping: HashMap<Ident, Ident> = HashMap::new();
-
-    let bools = collect_bool_conditions(vc_expr)
-        .into_iter()
-        .filter(|b| {
-            let vars = collect_program_vars(b);
-
-            vars.iter().all(|id| {
-                if let Some(allowed_ident) = allowed_vars.get(&id.name) {
-                    // allowed var (vardecl.name) → program var (id)
-                    var_mapping
-                        .entry(allowed_ident.clone())
-                        .or_insert_with(|| id.clone());
-                    true
-                } else {
-                    false
-                }
-            })
-        })
-        .collect();
-
-    (bools, var_mapping)
+    (out, param_var_mapping)
 }
 
 fn collect_program_vars(expr: &Expr) -> indexmap::IndexSet<Ident> {
@@ -480,8 +562,9 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
     signed_output_type: TyKind,
     output_type: &TyKind,
     max_degree: usize,
-) -> (Expr, usize) {
+) -> (Expr, usize, usize) {
     let mut final_expr: Option<Expr> = None;
+    let mut num_guard_expressions = 0;
 
     let clamp_with_zero_type =
         if signed_output_type == TyKind::Int || signed_output_type == TyKind::UInt {
@@ -511,6 +594,7 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
 
             num_sat_checks = num_sat_checks + 1;
             if prover.check_sat() == SatResult::Sat {
+                num_guard_expressions = num_guard_expressions + 1;
                 let iverson_both =
                     builder.unary(UnOpKind::Iverson, Some(clamp_with_zero_type.clone()), both);
 
@@ -559,7 +643,7 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
         }
     }
 
-    (final_expr.unwrap(), num_sat_checks)
+    (final_expr.unwrap(), num_sat_checks, num_guard_expressions)
 }
 
 pub fn build_template_expression<'smt, 'ctx>(
@@ -572,6 +656,7 @@ pub fn build_template_expression<'smt, 'ctx>(
     split_count: usize,
     translate: &mut TranslateExprs<'smt, 'ctx>,
     ctx: &'ctx z3::Context,
+    limits_ref: LimitsRef,
 ) -> (Expr, Vec<(Ident, TyKind)>, usize, usize) {
     let mut output_type = TyKind::EUReal;
     if let Some(DeclKind::FuncDecl(func_ref)) = tcx.get(*synth_name).as_deref() {
@@ -595,6 +680,7 @@ pub fn build_template_expression<'smt, 'ctx>(
     let mut program_var_decls = Vec::new();
     let mut program_vars = Vec::new();
     let mut program_vars_no_cast = Vec::new();
+    let mut program_vars_for_conditions = Vec::new();
 
     for param in &synth_val.inputs.node {
         let vardecl = VarDecl::from_param(param, VarKind::Input)
@@ -608,11 +694,14 @@ pub fn build_template_expression<'smt, 'ctx>(
                 casted = builder.cast(signed_output_type.clone(), raw.clone());
             }
             // println!("Created pvar {} of type {:?}", casted, casted.ty);
-            program_var_decls.push(vardecl);
+            program_var_decls.push(vardecl.clone());
             program_vars.push(casted);
             program_vars_no_cast.push(raw);
         }
+        program_vars_for_conditions.push(builder.var(vardecl.name, tcx));
     }
+
+    let mappings = collect_call_var_param_maps(vc_expr, synth_name, &program_vars_for_conditions);
 
     // Template-variable declaration closure
     let mut declare_template_var = |name: String| -> decl::VarDecl {
@@ -636,7 +725,8 @@ pub fn build_template_expression<'smt, 'ctx>(
     let mut var_map = [].into();
     // Step 1: Collect Boolean conditions relevant to the inputs
     if split_count >= 1 {
-        (bool_exprs, var_map) = collect_relevant_bool_conditions(synth_val, vc_expr);
+        (bool_exprs, var_map) =
+            collect_relevant_bool_conditions(synth_val, vc_expr, mappings, tcx, limits_ref);
     }
 
     if bool_exprs.is_empty() {
@@ -648,8 +738,7 @@ pub fn build_template_expression<'smt, 'ctx>(
         .iter()
         .filter_map(|v| {
             let r = v.range.as_ref()?;
-            let mapped = var_map.get(&v.name)?;
-            Some((builder.var(mapped.clone(), tcx), r.clone()))
+            Some((builder.var(v.name, tcx), r.clone()))
         })
         .collect();
 
@@ -674,7 +763,7 @@ pub fn build_template_expression<'smt, 'ctx>(
     // }
 
     // Step 4: Combine original guards × split conditions and multiply each with own lin.exp
-    let (mut final_expr, temp_sat_checks) = assemble_piecewise_expression(
+    let (mut final_expr, temp_sat_checks, num_guard_expr) = assemble_piecewise_expression(
         synth_name,
         &valid_iversons,
         &split_conditions,

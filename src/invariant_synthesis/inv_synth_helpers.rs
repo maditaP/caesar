@@ -10,13 +10,18 @@ use z3rro::{
 
 use crate::{
     ast::{
-        self, BinOpKind, DeclKind, Direction, DomainSpec, Expr, ExprBuilder, ExprData, ExprKind, Ident, Shared, Span, Spanned, Stmt, StmtKind, TyKind, UnOpKind, visit::{VisitorMut, walk_expr, walk_stmt}
-    }, driver::{commands::verify::VerifyCommand, error::CaesarError, quant_proof::BoolVcProveTask, smt_proof::SmtVcProveTask}, resource_limits::LimitsRef, smt::{
-        symbolic::Symbolic, translate_exprs::TranslateExprs, uninterpreted::FuncEntry
-    }, tyctx::TyCtx,
-    driver::{
-        front::SourceUnit,
+        self,
+        visit::{walk_expr, walk_stmt, VisitorMut},
+        BinOpKind, DeclKind, Direction, DomainSpec, Expr, ExprBuilder, ExprData, ExprKind, Ident,
+        Range, Shared, Span, Spanned, Stmt, StmtKind, TyKind, UnOpKind,
     },
+    driver::{
+        commands::verify::VerifyCommand, error::CaesarError, front::SourceUnit,
+        quant_proof::BoolVcProveTask, smt_proof::SmtVcProveTask,
+    },
+    resource_limits::LimitsRef,
+    smt::{symbolic::Symbolic, translate_exprs::TranslateExprs, uninterpreted::FuncEntry},
+    tyctx::TyCtx,
 };
 // Takes a function and substitutes calls to that function with the functions body,
 // substituting function parameters with the caller argumentspub struct FunctionInliner<'ctx, T: FuncLookup> {
@@ -221,6 +226,7 @@ pub fn get_model_for_constraints<'smt, 'ctx, 'tcx: 'ctx>(
         prover.set_timeout(remaining);
     }
     // Add axioms and assumptions
+    // Maybe the bug is here?
     translate.ctx.add_lit_axioms_to_prover(&mut prover);
     translate
         .ctx
@@ -235,8 +241,12 @@ pub fn get_model_for_constraints<'smt, 'ctx, 'tcx: 'ctx>(
     // vs. add_provable, which would negate it first.
     prover.add_assumption(&constraints_prove_task.vc);
 
+    println!("Constraints prove task");
+    println!("{}",prover.get_smtlib().into_string());
+
     // Run solver & retrieve model if available
     prover.check_sat();
+
     let model = prover.get_model();
 
     // If we find a model for the template constraints, filter it to the template variables and create a mapping from it.
@@ -303,8 +313,7 @@ pub struct InsertAssumeBeforeCalls<'a> {
 }
 
 impl<'a> InsertAssumeBeforeCalls<'a> {
-
-      fn guarded_args(&self, e: &Expr) -> Vec<Expr> {
+    fn guarded_args(&self, e: &Expr) -> Vec<Expr> {
         let mut collector = CallArgCollector::new(self.func_idents);
 
         // clone so we can walk mutably without touching the original
@@ -342,7 +351,10 @@ impl<'a> InsertAssumeBeforeCalls<'a> {
             });
         }
 
-        stmts.push(Spanned { span, node: original });
+        stmts.push(Spanned {
+            span,
+            node: original,
+        });
 
         StmtKind::Seq(stmts)
     }
@@ -357,22 +369,20 @@ impl<'a> VisitorMut for InsertAssumeBeforeCalls<'a> {
 
         // -------- Phase 1: collect guarded arguments
         let args: Vec<Expr> = match &s.node {
-            StmtKind::Var(decl) =>
-                decl.borrow().init
-                    .as_ref()
-                    .map(|e| self.guarded_args(e))
-                    .unwrap_or_default(),
+            StmtKind::Var(decl) => decl
+                .borrow()
+                .init
+                .as_ref()
+                .map(|e| self.guarded_args(e))
+                .unwrap_or_default(),
 
             StmtKind::Assign(_, e)
             | StmtKind::Assert(_, e)
             | StmtKind::Assume(_, e)
             | StmtKind::Compare(_, e)
-            | StmtKind::Tick(e) =>
-                self.guarded_args(e),
+            | StmtKind::Tick(e) => self.guarded_args(e),
 
-            StmtKind::If(cond, _, _)
-            | StmtKind::While(cond, _) =>
-                self.guarded_args(cond),
+            StmtKind::If(cond, _, _) | StmtKind::While(cond, _) => self.guarded_args(cond),
 
             _ => Vec::new(),
         };
@@ -390,3 +400,151 @@ impl<'a> VisitorMut for InsertAssumeBeforeCalls<'a> {
         walk_stmt(self, s)
     }
 }
+
+struct IdentUseCollector {
+    used: Vec<Ident>,
+}
+
+impl VisitorMut for IdentUseCollector {
+    type Err = ();
+
+    fn visit_expr(&mut self, e: &mut Expr) -> Result<(), Self::Err> {
+        if let ExprKind::Var(id) = &e.kind {
+            self.used.push(id.clone());
+        }
+        walk_expr(self, e)
+    }
+}
+
+pub struct InsertAssumeForRanges {
+    ranges: HashMap<Ident, Range>,
+    pub(crate) direction: Direction,
+}
+
+impl InsertAssumeForRanges {
+    pub fn new(direction: Direction) -> Self {
+        Self {
+            ranges: HashMap::new(),
+            direction,
+        }
+    }
+
+    // ---- Collect idents from a single expression
+    fn idents_in_expr(&self, e: &Expr) -> Vec<Ident> {
+        let mut collector = IdentUseCollector { used: Vec::new() };
+        let mut e_clone = e.clone();
+        collector.visit_expr(&mut e_clone).unwrap();
+        collector.used
+    }
+
+    // ---- Collect idents local to this statement only
+    fn local_used_idents(&self, s: &Stmt) -> Vec<Ident> {
+        match &s.node {
+            StmtKind::Assign(_, e)
+            | StmtKind::Assert(_, e)
+            | StmtKind::Assume(_, e)
+            | StmtKind::Compare(_, e)
+            | StmtKind::Tick(e) =>
+                self.idents_in_expr(e),
+
+            StmtKind::Var(decl) =>
+                decl.borrow()
+                    .init
+                    .as_ref()
+                    .map(|e| self.idents_in_expr(e))
+                    .unwrap_or_default(),
+
+            StmtKind::If(cond, _, _)
+            | StmtKind::While(cond, _) =>
+                self.idents_in_expr(cond),
+
+            _ => Vec::new(),
+        }
+    }
+
+    // ---- Build assume for a variable range
+    fn make_range_assume(
+        &self,
+        span: Span,
+        ident: Ident,
+        range: &Range,
+    ) -> Stmt {
+        let builder = ExprBuilder::new(Span::dummy_span());
+
+        let var = builder.var_ty(ident.clone(), TyKind::UInt);
+
+        let lower = builder.binary(
+            BinOpKind::Le,
+            Some(TyKind::Bool),
+            builder.uint(range.lower.into()),
+            var.clone(),
+        );
+
+        let upper = builder.binary(
+            BinOpKind::Le,
+            Some(TyKind::Bool),
+            var,
+            builder.uint(range.upper.into()),
+        );
+
+        let conj = builder.binary(
+            BinOpKind::And,
+            Some(TyKind::Bool),
+            lower,
+            upper,
+        );
+
+        let embedded =
+            builder.unary(UnOpKind::Embed, Some(TyKind::EUReal), conj);
+
+        Spanned {
+            span,
+            node: StmtKind::Assume(self.direction, embedded),
+        }
+    }
+}
+impl VisitorMut for InsertAssumeForRanges {
+    type Err = ();
+
+    fn visit_stmt(&mut self, s: &mut Stmt) -> Result<(), Self::Err> {
+        let span = s.span;
+
+        // ---- Phase 1: record ranges at variable declarations
+        if let StmtKind::Var(decl) = &s.node {
+            let decl = decl.borrow();
+            if let Some(range) = &decl.range {
+                self.ranges.insert(decl.name.clone(), range.clone());
+            }
+        }
+
+        // ---- Phase 2: collect local identifier uses
+        let used = self.local_used_idents(s);
+
+        let mut assumes = Vec::new();
+        for id in used {
+            if let Some(range) = self.ranges.get(&id) {
+                assumes.push(self.make_range_assume(span, id.clone(), range));
+            }
+        }
+
+        // ---- Phase 3: rewrite locally
+        if !assumes.is_empty() {
+            println!("originally {s}");
+            let original =
+                std::mem::replace(&mut s.node, StmtKind::Seq(vec![]));
+
+            let mut stmts = assumes;
+            stmts.push(Spanned { span, node: original });
+
+            s.node = StmtKind::Seq(stmts);
+            println!("after: {s}");
+
+            return Ok(());
+        }
+
+        // ---- Phase 4: recurse
+        walk_stmt(self, s)
+    }
+}
+
+

@@ -33,6 +33,7 @@ pub fn lower_quant_prove_task(
 ) -> Result<BoolVcProveTask, CaesarError> {
     // 1. Unfolding (applies substitutions)
     quant_task.unfold(options, limits_ref, tcx)?;
+    quant_task.remove_neutrals(limits_ref, tcx)?;
 
     // 2. Quantifier elimination
     if !options.opt_options.no_qelim {

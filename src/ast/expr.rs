@@ -426,7 +426,7 @@ impl LitKind {
             _ => false,
         }
     }
-     pub fn is_one(&self) -> bool {
+    pub fn is_one(&self) -> bool {
         match self {
             LitKind::UInt(num) => num.is_one(),
             LitKind::Int(num) => num.is_one(),
@@ -701,6 +701,16 @@ impl ExprBuilder {
             ty: Some(TyKind::Real),
             span: self.span,
         })
+    }
+
+    pub fn abs_diff(&self, lhs: Expr, rhs: Expr, ty: TyKind) -> Expr {
+        let diff = self.binary(BinOpKind::Sub, Some(ty.clone()), lhs.clone(), rhs.clone());
+
+        let neg_diff = self.binary(BinOpKind::Sub, Some(ty.clone()), rhs.clone(), lhs.clone());
+
+        let ge = self.binary(BinOpKind::Ge, Some(TyKind::Bool), lhs, rhs);
+
+        self.ite(Some(ty),ge, diff, neg_diff)
     }
 }
 
