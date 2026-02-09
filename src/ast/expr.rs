@@ -647,7 +647,7 @@ impl ExprBuilder {
         match ty {
             TyKind::Bool | TyKind::UInt | TyKind::UReal | TyKind::EUReal => self.bot_lit(ty),
             TyKind::Int => self.cast(TyKind::Int, self.uint(0)),
-            TyKind::Real => self.cast(TyKind::Real, self.frac_lit(Zero::zero())),
+            TyKind::Real => self.cast(TyKind::Real, self.frac_lit_not_extended(Zero::zero())),
             _ => panic!("type {ty} has no zero element"),
         }
     }
@@ -683,7 +683,7 @@ impl ExprBuilder {
     pub fn frac_lit(&self, value: BigRational) -> Expr {
         Shared::new(ExprData {
             kind: ExprKind::Lit(Spanned::new(self.span, LitKind::Frac(value))),
-            ty: Some(TyKind::UReal),
+            ty: Some(TyKind::EUReal),
             span: self.span,
         })
     }

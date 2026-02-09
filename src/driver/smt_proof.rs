@@ -421,12 +421,9 @@ impl<'ctx> SmtVcProveTask<'ctx> {
     /// Run the solver(s) on this SMT formula.
     pub fn no_slice_run_solver<'smt>(
         self,
-        options: &VerifyCommand,
         limits_ref: &LimitsRef,
-        name: &SourceUnitName,
         ctx: &'ctx Context,
         translate: &mut TranslateExprs<'smt, 'ctx>,
-        slice_vars: &SliceStmts,
     ) -> Result<SmtVcProveResultNoSlice<'ctx>, CaesarError> {
    
     let mut prover = Prover::new(&ctx, IncrementalMode::Native);
@@ -447,7 +444,8 @@ impl<'ctx> SmtVcProveTask<'ctx> {
     prover.add_provable(&self.vc);
 
 
-   
+    println!("prover stuff {}", prover.get_smtlib().into_string());
+//    
     // Run solver & retrieve model if available
    let result =  prover.check_proof();
 //    let result =  prover.check_sat();

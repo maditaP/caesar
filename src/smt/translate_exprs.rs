@@ -127,7 +127,6 @@ impl<'smt, 'ctx> TranslateExprs<'smt, 'ctx> {
     }
 
     pub fn t_bool(&mut self, expr: &Expr) -> Bool<'ctx> {
-        // println!("calling t_bool with:  {expr:?}");
         assert_eq!(
             &expr.ty,
             &Some(TyKind::Bool),

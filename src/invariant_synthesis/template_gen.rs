@@ -190,10 +190,6 @@ fn build_polynomial_combination(
         builder.zero_lit(&clamp_with_zero_type),
     );
 
-    println!("final expr {final_expr}");
-    println!("clamp_with_zero_type {clamp_with_zero_type}");
-    println!("signed_outp {signed_output_type}");
-    println!("poly_with_const_type {:?}", poly_with_const.ty);
     // let mut final_expr = Shared::new(ExprData {
     //     kind: ExprKind::Call(clamp_with_zero_name, vec![poly_with_const.clone()]),
     //     ty: Some(clamp_with_zero_type),

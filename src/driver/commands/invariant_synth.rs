@@ -1,11 +1,10 @@
 use std::{ops::DerefMut, process::ExitCode, sync::Arc};
 
-use crate::ast::util::{FreeVariableCollector, remove_casts};
+use crate::ast::util::{remove_casts, FreeVariableCollector};
 use crate::ast::visit::VisitorMut;
 use crate::ast::{Direction, Ident};
 use crate::invariant_synthesis::inv_synth_helpers::{
-    canonical_form, create_subst_mapping, get_functions_from_source_unit,
-    get_model_for_constraints, subst_from_mapping, FunctionInliner, InsertAssumeBeforeCalls,
+    FunctionInliner, InsertAssumeBeforeCalls, InsertAssumeForRanges, PiecewiseLinearCounter, canonical_form, create_subst_mapping, get_functions_from_source_unit, get_model_for_constraints, subst_from_mapping
 };
 use crate::invariant_synthesis::template_gen::{build_template_expression, get_synth_functions};
 use crate::opt::unfolder::Unfolder;
@@ -104,8 +103,7 @@ fn synth_inv_main(
     let mut num_failures: usize = 0;
     let mut total_num_cegis_its = 0;
     const MAX_CEGIS_ITERS: usize = 3000;
-    // let max_split_count: usize = options.synth_options.max_template_refinements.unwrap_or(30) + 1;
-    let max_split_count = 30;
+    let max_split_count: usize = options.synth_options.max_template_refinements.unwrap_or(30) + 1;
     let mut template_satchecks = 0;
     let mut duration_template_building = Duration::new(0, 0);
 
@@ -176,9 +174,9 @@ fn synth_inv_main(
                 func_idents: &target_funcs,
                 direction: Direction::Up, // or whatever is appropriate
             };
-            //   let mut visitor = InsertAssumeForRanges::new(
-            //     Direction::Up, // or whatever is appropriate
-            //   );
+              let mut visitor = InsertAssumeForRanges::new(
+                Direction::Up, // or whatever is appropriate
+              );
             let synth_inv_unit = if options.synth_options.only_well_defined {
                 item.flat_map(|unit| {
                     CoreVerifyTask::from_source_unit2(unit, &mut depgraph, &mut visitor)
@@ -204,7 +202,7 @@ fn synth_inv_main(
             // spec call desugaring, preparing slicing, and verification condition
             // generation.
 
-            let (mut vc_expr, slice_vars) = lower_core_verify_task(
+            let (mut vc_expr, _slice_vars) = lower_core_verify_task(
                 &mut tcx,
                 name,
                 options,
@@ -287,7 +285,7 @@ fn synth_inv_main(
                     unfolder.visit_expr(&mut tpl)?;
                     // println!("template for `{}`: {} before neutrals remover", synth_name, remove_casts(&tpl));
 
-                    // let mut neutrals_remover =
+                    // let mut neutrals_remover =z
                     //     NeutralsRemover::new(limits_ref.clone(), &smt_ctx_local);
                     // neutrals_remover.visit_expr(&mut tpl)?;
 
@@ -343,7 +341,7 @@ fn synth_inv_main(
 
             let vc_vars = collector.collect_and_clear(&mut boolean_vc.vc);
 
-            let mut cex_mapping: IndexMap<Ident, Expr>;
+            let mut cex_mapping: IndexMap<Ident, Expr> = [].into();
 
             let mut all_cexs: IndexSet<String> = [].into();
             let mut all_zems: IndexSet<String> = [].into();
@@ -408,6 +406,7 @@ fn synth_inv_main(
                     &limits_ref.clone(),
                     &smt_ctx,
                 )?;
+                let mut bvc_tvars_inst_with_distance = bvc_tvars_inst.clone();
 
                 if options.synth_options.print_cegis_info {
                     for (_synth_name, template_expr, _num_guards) in templates.iter() {
@@ -438,9 +437,63 @@ fn synth_inv_main(
 
                 // refined_vc.remove_neutrals(&limits_ref, &tcx)?;
 
+                if false {
+                    let mut sum_opt: Option<Expr> = None;
+                    let output_type = TyKind::UInt;
+                    for (ident, expr) in cex_mapping.clone() {
+                        if template_idents.contains(&ident) {
+                            continue;
+                        }
+
+                        let ident_expr = builder.var(ident.clone(), &tcx);
+                        let abs = builder.abs_diff(
+                            ident_expr.clone(),
+                            expr.clone(),
+                            ident_expr.ty.clone().unwrap_or(TyKind::UReal),
+                        );
+
+                        sum_opt = Some(match sum_opt {
+                            None => abs,
+                            Some(acc) => builder.binary(
+                                BinOpKind::Add,
+                                Some(ident_expr.ty.clone().unwrap_or(TyKind::UReal)),
+                                acc,
+                                abs,
+                            ),
+                        });
+                    }
+
+                    let sum = sum_opt.expect("No template variables found");
+
+                    let lt_two = builder.binary(
+                        BinOpKind::Lt,
+                        Some(TyKind::Bool),
+                        sum,
+                        builder.binary(
+                            BinOpKind::Add,
+                            Some(output_type.clone()),
+                            builder.one_lit(&output_type.clone()),
+                            builder.one_lit(&output_type.clone()),
+                        ),
+                    );
+
+                    // println!("ge two: {ge_two}");
+
+                    bvc_tvars_inst_with_distance = builder.binary(
+                        BinOpKind::Or,
+                        Some(TyKind::Bool),
+                        bvc_tvars_inst.clone(),
+                        lt_two,
+                    );
+                }
+
                 let bvc_tvars_inst_btask = BoolVcProveTask {
                     quant_vc: vc_expr.clone(), // This is a random quant_task and should not!! be used
                     vc: bvc_tvars_inst,
+                };
+                let bvc_tvars_inst_btask_with_distance = BoolVcProveTask {
+                    quant_vc: vc_expr.clone(), // This is a random quant_task and should not!! be used
+                    vc: bvc_tvars_inst_with_distance,
                 };
 
                 // println!("checking for validity: {}", bvc_tvars_inst_btask.vc);
@@ -448,98 +501,128 @@ fn synth_inv_main(
                 bvc_tvars_inst_smttask =
                     SmtVcProveTask::translate(bvc_tvars_inst_btask, &mut translate);
 
-                let result_verifier = bvc_tvars_inst_smttask.clone().no_slice_run_solver(
-                    options,
-                    &limits_ref,
-                    name,
-                    &ctx,
-                    &mut translate,
-                    &slice_vars,
-                )?;
-                let prove_result_verifier = result_verifier.prove_result;
-                duration_check = start_check.elapsed() + duration_check; // Template instantiation time
+                let bvc_tvars_inst_smttask_with_distance =
+                    SmtVcProveTask::translate(bvc_tvars_inst_btask_with_distance, &mut translate);
 
-                match prove_result_verifier {
+                let result_verifier = bvc_tvars_inst_smttask_with_distance
+                    .clone()
+                    .no_slice_run_solver(
+                        &limits_ref,
+                        &ctx,
+                        &mut translate,
+                    )?;
+                let prove_result_verifier_with_distance = result_verifier.prove_result;
+
+                match prove_result_verifier_with_distance {
                     ProveResult::Proof => {
-                        num_proven += 1;
+                        let result_verifier = bvc_tvars_inst_smttask.clone().no_slice_run_solver(
+                            &limits_ref,
+                            &ctx,
+                            &mut translate,
+                        )?;
+                        let prove_result_verifier = result_verifier.prove_result;
+                        duration_check = start_check.elapsed() + duration_check; // Template instantiation time
 
-                        let mut instantiated_tasks = Vec::new();
+                        match prove_result_verifier {
+                            ProveResult::Proof => {
+                                num_proven += 1;
 
-                        for (synth_name, template_expr, num_guards) in templates.iter() {
-                            let instantiated = subst_from_mapping(
-                                zero_extended_mapping.clone(),
-                                template_expr,
-                                &limits_ref.clone(),
-                                &smt_ctx,
-                            )?;
+                                let mut instantiated_tasks = Vec::new();
 
-                            let mut task = QuantVcProveTask {
-                                expr: instantiated,
-                                direction,
-                                deps: vcdeps.clone(),
-                            };
+                                for (synth_name, template_expr, num_guards) in templates.iter() {
+                                    let instantiated = subst_from_mapping(
+                                        zero_extended_mapping.clone(),
+                                        template_expr,
+                                        &limits_ref.clone(),
+                                        &smt_ctx,
+                                    )?;
 
-                            task.remove_neutrals(&limits_ref, &tcx)?;
+                                    let mut task = QuantVcProveTask {
+                                        expr: instantiated,
+                                        direction,
+                                        deps: vcdeps.clone(),
+                                    };
 
-                            instantiated_tasks.push((synth_name.clone(), task));
-                            if options.synth_options.print_benchmark_info {
-                                println!(
+                                    task.remove_neutrals(&limits_ref, &tcx)?;
+
+                                    instantiated_tasks.push((synth_name.clone(), task));
+                                    if options.synth_options.print_benchmark_info {
+                                        println!(
                                     "Number of guard expressions for invariant {synth_name}: {}",
                                     num_guards
                                 );
-                            }
-                        }
+                                    }
+                                }
 
-                        let duration_inductivity = start_total.elapsed();
+                                let duration_inductivity = start_total.elapsed();
 
-                        if options.synth_options.print_benchmark_info {
-                            println!("");
-                            println!("=== Benchmark info ===");
+                                if options.synth_options.print_benchmark_info {
+                                    println!("");
+                                    println!("=== Benchmark info ===");
 
-                            println!(
-                                "Total synthesis took: {:.2}",
-                                duration_inductivity.as_secs_f64()
-                            );
-                            println!(
-                                "Template building took: {:.2}",
-                                duration_template_building.as_secs_f64()
-                            );
-                            println!(
-                                "Verification checks took: {:.2}",
-                                duration_check.as_secs_f64()
-                            );
-                            // println!(
-                            //     "Template instantiation took: {:.2}",
-                            //     duration_template_inst.as_secs_f64()
-                            // );
-                            println!(
-                                "Time spent in synthesizer: {:.2}",
-                                time_spent_in_synthesizer.as_secs_f64()
-                            );
+                                    println!(
+                                        "Total synthesis took: {:.2}",
+                                        duration_inductivity.as_secs_f64()
+                                    );
+                                    println!(
+                                        "Template building took: {:.2}",
+                                        duration_template_building.as_secs_f64()
+                                    );
+                                    println!(
+                                        "Verification checks took: {:.2}",
+                                        duration_check.as_secs_f64()
+                                    );
+                                    // println!(
+                                    //     "Template instantiation took: {:.2}",
+                                    //     duration_template_inst.as_secs_f64()
+                                    // );
+                                    println!(
+                                        "Time spent in synthesizer: {:.2}",
+                                        time_spent_in_synthesizer.as_secs_f64()
+                                    );
 
-                            println!("Number of templates generated: {}", split_count + 1);
-                            println!(
-                                "Number of counterexamples checked {}",
-                                total_num_cegis_its - 1
-                            );
-                            println!(
+                                    println!("Number of templates generated: {}", split_count + 1);
+                                    println!(
+                                        "Number of counterexamples checked {}",
+                                        total_num_cegis_its - 1
+                                    );
+                                    println!(
                                 "Number of sat checks in template building {template_satchecks}"
                             );
-                            println!("=======================");
-                            println!("");
-                        }
+                                    println!("=======================");
+                                    println!("");
+                                }
 
-                        split_count = max_split_count + 1;
-                        println!(
+                                split_count = max_split_count + 1;
+                                println!(
                             "After {iteration} CEGIS loop iterations, the following admissible invariants were found:"
                         );
-                        for (name, task) in instantiated_tasks.iter() {
-                            println!("  {} := {}", name, remove_casts(&task.expr));
+                                for (name, task) in instantiated_tasks.iter() {
+                                    println!("  {} := {}", name, remove_casts(&task.expr));
+                                    let mut counter = PiecewiseLinearCounter::new();
+                                    counter.visit_expr(&mut task.expr.clone());
+                                    println!(
+                                        "with size {} (piecewise linear expressions) ",
+                                        counter.count
+                                    );
+                                }
+                                break;
+                            }
+
+                            ProveResult::Counterexample => {
+                                println!("cex");
+                            }
+                            ProveResult::Unknown(msg) => {
+                                num_failures += 1;
+                                println!("Solver returned unknown for {name}: {msg}");
+                                break;
+                            }
                         }
-                        break;
                     }
 
-                    ProveResult::Counterexample => {}
+                    ProveResult::Counterexample => {
+                        println!("cex");
+                    }
                     ProveResult::Unknown(msg) => {
                         num_failures += 1;
                         println!("Solver returned unknown for {name}: {msg}");
@@ -583,7 +666,6 @@ fn synth_inv_main(
                         ));
                     }
 
-
                     let cex_mapping_only_pvars: IndexMap<Ident, Expr> = cex_mapping
                         .iter()
                         // .filter(|(key, _)| !template_idents.contains(key))
@@ -596,6 +678,7 @@ fn synth_inv_main(
                         &limits_ref.clone(),
                         &smt_ctx,
                     )?;
+                    println!("Adding constraint: {bvc_pvars_inst:?}");
 
                     // Add the new constraint to the constraint-set via conjunction
                     constraints = builder.binary(
@@ -614,7 +697,6 @@ fn synth_inv_main(
                     };
 
                     // --- Phase 3: Evaluate template variables in original vc ---
-
                     if let Some(mapping) = get_model_for_constraints(
                         &ctx,
                         options,

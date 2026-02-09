@@ -11,7 +11,10 @@ use z3rro::{
 
 use crate::{
     ast::{
-        self, BinOpKind, DeclKind, Direction, DomainSpec, Expr, ExprBuilder, ExprData, ExprKind, Ident, Range, Shared, Span, Spanned, Stmt, StmtKind, TyKind, UnOpKind, visit::{VisitorMut, walk_expr, walk_stmt}
+        self,
+        visit::{walk_expr, walk_stmt, VisitorMut},
+        BinOp, BinOpKind, DeclKind, Direction, DomainSpec, Expr, ExprBuilder, ExprData, ExprKind,
+        Ident, Range, Shared, Span, Spanned, Stmt, StmtKind, TyKind, UnOpKind,
     },
     driver::{
         commands::verify::VerifyCommand, error::CaesarError, front::SourceUnit,
@@ -19,7 +22,10 @@ use crate::{
     },
     opt::unfolder::Unfolder,
     resource_limits::LimitsRef,
-    smt::{SmtCtx, pretty_model::pretty_var_value, symbolic::Symbolic, translate_exprs::TranslateExprs, uninterpreted::FuncEntry},
+    smt::{
+        pretty_model::pretty_var_value, symbolic::Symbolic, translate_exprs::TranslateExprs,
+        uninterpreted::FuncEntry, SmtCtx,
+    },
     tyctx::TyCtx,
 };
 // Takes a function and substitutes calls to that function with the functions body,
@@ -147,7 +153,6 @@ pub fn create_subst_mapping<'ctx>(
         let var_expr = builder.var(ident.clone(), translate.ctx.tcx());
         let symbolic = translate.t_symbolic(&var_expr);
         let lit_opt = match &symbolic {
-
             Symbolic::Bool(v) => v.eval(model).ok().map(|b| builder.bool_lit(b)),
 
             Symbolic::Int(v) => v
@@ -174,7 +179,7 @@ pub fn create_subst_mapping<'ctx>(
             Symbolic::UReal(v) => {
                 let eval = v.eval(model);
                 eval.ok()
-                    .map(|r: BigRational| builder.frac_lit_not_extended(r))
+                    .map(|r: BigRational| builder.frac_lit(r))
             }
 
             Symbolic::EUReal(v) => v.eval(model).ok().map(|r| match r {
@@ -201,7 +206,7 @@ pub fn subst_from_mapping<'ctx>(
     vc: &Expr,
     limits_ref: &LimitsRef,
     smt_ctx: &SmtCtx<'ctx>,
-) -> Result<Expr,CaesarError> {
+) -> Result<Expr, CaesarError> {
     let mut wrapped = vc.clone();
     for (ident, expr) in mapping {
         wrapped = Shared::new(ExprData {
@@ -233,7 +238,7 @@ pub fn get_model_for_constraints<'smt, 'ctx, 'tcx: 'ctx>(
     if let Some(remaining) = limits_ref.time_left() {
         prover.set_timeout(remaining);
     }
- 
+
     // Add axioms and assumptions
     // Maybe the bug is here?
     translate.ctx.add_lit_axioms_to_prover(&mut prover);
@@ -250,15 +255,16 @@ pub fn get_model_for_constraints<'smt, 'ctx, 'tcx: 'ctx>(
     // vs. add_provable, which would negate it first.
     prover.add_assumption(&constraints_prove_task.vc);
 
-    // println!("Constraints prove task");
-    // println!("{}",prover.get_smtlib().into_string());
+    println!("Constraints prove task");
+    println!("{}",prover.get_smtlib().into_string());
 
     // Run solver & retrieve model if available
     prover.check_sat();
 
     let model = prover.get_model();
 
-    // If we find a model for the template constraints, filter it to the template variables and create a mapping from it.
+
+    // If we find a model for the tema checplate constraints, filter it to the template variables and create a mapping from it.
     if let Some(template_model) = model {
         let mapping = create_subst_mapping(idents, &template_model, translate);
         Ok(Some(mapping))
@@ -494,7 +500,7 @@ impl InsertAssumeForRanges {
 
         Spanned {
             span,
-            node: StmtKind::Assume(self.direction, embedded),
+            node: StmtKind::Assert(self.direction, embedded),
         }
     }
 }
@@ -516,10 +522,8 @@ impl VisitorMut for InsertAssumeForRanges {
         let used = self.local_used_idents(s);
 
         let mut assumes = Vec::new();
-        for id in used {
-            if let Some(range) = self.ranges.get(&id) {
-                assumes.push(self.make_range_assume(span, id.clone(), range));
-            }
+        for (id, range) in self.ranges.clone() {
+                assumes.push(self.make_range_assume(span, id.clone(), &range));
         }
 
         // ---- Phase 3: rewrite locally
@@ -540,10 +544,10 @@ impl VisitorMut for InsertAssumeForRanges {
         }
 
         // ---- Phase 4: recurse
-        walk_stmt(self, s)
+        // walk_stmt(self, s)
+        Ok(())
     }
 }
-
 
 pub fn canonical_form(map: &IndexMap<Ident, Expr>) -> String {
     let mut items: Vec<_> = map.iter().collect();
@@ -552,9 +556,35 @@ pub fn canonical_form(map: &IndexMap<Ident, Expr>) -> String {
 
     items
         .into_iter()
-        .map(|(ident, expr)| {
-            format!("{}={}", ident, expr)
-        })
+        .map(|(ident, expr)| format!("{}={}", ident, expr))
         .collect::<Vec<_>>()
         .join(";")
+}
+
+pub struct PiecewiseLinearCounter {
+    pub count: usize,
+}
+
+impl PiecewiseLinearCounter {
+    pub fn new() -> Self {
+        Self { count: 0 }
+    }
+}
+
+impl VisitorMut for PiecewiseLinearCounter {
+    type Err = ();
+
+    fn visit_expr(&mut self, expr: &mut Expr) -> Result<(), Self::Err> {
+        if let ExprKind::Binary(bin_op, lhs, _) = &expr.kind {
+            if bin_op.node == BinOpKind::Mul {
+                if let ExprKind::Unary(un_op, _) = &lhs.kind {
+                    if un_op.node == UnOpKind::Iverson {
+                        self.count += 1;
+                    }
+                }
+            }
+        }
+
+        walk_expr(self, expr)
+    }
 }
