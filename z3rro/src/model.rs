@@ -206,13 +206,21 @@ impl<'ctx> SmtEval<'ctx> for Real<'ctx> {
         if let Some((num, den)) = res.as_real() {
             Ok(BigRational::new(num.into(), den.into()))
         } else {
-            // we parse a string of the form "(/ num.0 denom.0)"
             let division_expr = format!("{res:?}");
-            if !division_expr.starts_with("(/ ") || !division_expr.ends_with(".0)") {
+
+            // Detect outer negation
+            let (is_neg, inner) =
+                if division_expr.starts_with("(- ") && division_expr.ends_with(')') {
+                    (true, &division_expr[3..division_expr.len() - 1])
+                } else {
+                    (false, division_expr.as_str())
+                };
+
+            if !inner.starts_with("(/ ") || !inner.ends_with(".0)") {
                 return Err(SmtEvalError::ParseError);
             }
 
-            let mut parts = division_expr.split_ascii_whitespace();
+            let mut parts = inner.split_ascii_whitespace();
 
             let first_part = parts.next().ok_or(SmtEvalError::ParseError)?;
             if first_part != "(/" {
@@ -220,13 +228,22 @@ impl<'ctx> SmtEval<'ctx> for Real<'ctx> {
             }
 
             let second_part = parts.next().ok_or(SmtEvalError::ParseError)?;
-            let second_part = second_part.replace(".0", "");
-            let numerator = BigInt::from_str(&second_part).map_err(|_| SmtEvalError::ParseError)?;
+            let numerator_str = second_part
+                .strip_suffix(".0")
+                .ok_or(SmtEvalError::ParseError)?;
+            let mut numerator =
+                BigInt::from_str(numerator_str).map_err(|_| SmtEvalError::ParseError)?;
 
             let third_part = parts.next().ok_or(SmtEvalError::ParseError)?;
-            let third_part = third_part.replace(".0)", "");
+            let denominator_str = third_part
+                .strip_suffix(".0)")
+                .ok_or(SmtEvalError::ParseError)?;
             let denominator =
-                BigInt::from_str(&third_part).map_err(|_| SmtEvalError::ParseError)?;
+                BigInt::from_str(denominator_str).map_err(|_| SmtEvalError::ParseError)?;
+
+            if is_neg {
+                numerator = -numerator;
+            }
 
             Ok(BigRational::new(numerator, denominator))
         }

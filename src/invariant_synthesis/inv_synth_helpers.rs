@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use indexmap::{IndexMap, IndexSet};
 use num::{BigInt, BigRational};
 
 use z3rro::{
@@ -10,17 +11,15 @@ use z3rro::{
 
 use crate::{
     ast::{
-        self,
-        visit::{walk_expr, walk_stmt, VisitorMut},
-        BinOpKind, DeclKind, Direction, DomainSpec, Expr, ExprBuilder, ExprData, ExprKind, Ident,
-        Range, Shared, Span, Spanned, Stmt, StmtKind, TyKind, UnOpKind,
+        self, BinOpKind, DeclKind, Direction, DomainSpec, Expr, ExprBuilder, ExprData, ExprKind, Ident, Range, Shared, Span, Spanned, Stmt, StmtKind, TyKind, UnOpKind, visit::{VisitorMut, walk_expr, walk_stmt}
     },
     driver::{
         commands::verify::VerifyCommand, error::CaesarError, front::SourceUnit,
         quant_proof::BoolVcProveTask, smt_proof::SmtVcProveTask,
     },
+    opt::unfolder::Unfolder,
     resource_limits::LimitsRef,
-    smt::{symbolic::Symbolic, translate_exprs::TranslateExprs, uninterpreted::FuncEntry},
+    smt::{SmtCtx, pretty_model::pretty_var_value, symbolic::Symbolic, translate_exprs::TranslateExprs, uninterpreted::FuncEntry},
     tyctx::TyCtx,
 };
 // Takes a function and substitutes calls to that function with the functions body,
@@ -135,20 +134,20 @@ impl<'smt, 'ctx> VisitorMut for FunctionInliner<'smt, 'ctx> {
 
 // Translates a model into a map Ident -> Expression
 pub fn create_subst_mapping<'ctx>(
+    idents: IndexSet<Ident>,
     model: &InstrumentedModel<'ctx>,
     translate: &mut crate::smt::translate_exprs::TranslateExprs<'_, 'ctx>,
-) -> HashMap<ast::symbol::Ident, Expr> {
+) -> IndexMap<ast::symbol::Ident, Expr> {
     let builder = ExprBuilder::new(Span::dummy_span());
-    let mut mapping = HashMap::new();
-
-    let idents: Vec<_> = translate.local_idents().collect();
+    let mut mapping = IndexMap::new();
+    // let idents: Vec<_> = translate.local_idents().collect();
 
     for ident in idents {
         // Build a variable expression to feed into t_symbolic
         let var_expr = builder.var(ident.clone(), translate.ctx.tcx());
         let symbolic = translate.t_symbolic(&var_expr);
-
         let lit_opt = match &symbolic {
+
             Symbolic::Bool(v) => v.eval(model).ok().map(|b| builder.bool_lit(b)),
 
             Symbolic::Int(v) => v
@@ -197,7 +196,12 @@ pub fn create_subst_mapping<'ctx>(
 /// "Instantiate" an expression with concrete values from a mapping.
 /// To do this, wrap the expression in nested `Subst` expressions.
 /// Then later tunfolding can take care of the actual substitutions.
-pub fn subst_from_mapping<'ctx>(mapping: HashMap<ast::symbol::Ident, Expr>, vc: &Expr) -> Expr {
+pub fn subst_from_mapping<'ctx>(
+    mapping: IndexMap<ast::symbol::Ident, Expr>,
+    vc: &Expr,
+    limits_ref: &LimitsRef,
+    smt_ctx: &SmtCtx<'ctx>,
+) -> Result<Expr,CaesarError> {
     let mut wrapped = vc.clone();
     for (ident, expr) in mapping {
         wrapped = Shared::new(ExprData {
@@ -206,7 +210,10 @@ pub fn subst_from_mapping<'ctx>(mapping: HashMap<ast::symbol::Ident, Expr>, vc: 
             span: vc.span,
         });
     }
-    wrapped
+
+    let mut unfolder = Unfolder::new(limits_ref.clone(), &smt_ctx);
+    unfolder.visit_expr(&mut wrapped)?;
+    Ok(wrapped)
 }
 
 /// Get a model for a BoolVcProveTask representing a constraint and return it as a hashmap
@@ -216,15 +223,17 @@ pub fn get_model_for_constraints<'smt, 'ctx, 'tcx: 'ctx>(
     limits_ref: &LimitsRef,
     constraints: BoolVcProveTask,
     translate: &mut TranslateExprs<'smt, 'ctx>,
-) -> Result<Option<HashMap<ast::symbol::Ident, Expr>>, CaesarError> {
-    let mut constraints_prove_task = SmtVcProveTask::translate(constraints, translate);
-    if !options.opt_options.no_simplify {
-        constraints_prove_task.simplify();
-    }
+    idents: IndexSet<Ident>,
+) -> Result<Option<IndexMap<ast::symbol::Ident, Expr>>, CaesarError> {
+    let constraints_prove_task = SmtVcProveTask::translate(constraints, translate);
+    // if !options.opt_options.no_simplify {
+    //     constraints_prove_task.simplify();
+    // }
     let mut prover = Prover::new(&ctx, IncrementalMode::Native);
     if let Some(remaining) = limits_ref.time_left() {
         prover.set_timeout(remaining);
     }
+ 
     // Add axioms and assumptions
     // Maybe the bug is here?
     translate.ctx.add_lit_axioms_to_prover(&mut prover);
@@ -241,8 +250,8 @@ pub fn get_model_for_constraints<'smt, 'ctx, 'tcx: 'ctx>(
     // vs. add_provable, which would negate it first.
     prover.add_assumption(&constraints_prove_task.vc);
 
-    println!("Constraints prove task");
-    println!("{}",prover.get_smtlib().into_string());
+    // println!("Constraints prove task");
+    // println!("{}",prover.get_smtlib().into_string());
 
     // Run solver & retrieve model if available
     prover.check_sat();
@@ -251,7 +260,7 @@ pub fn get_model_for_constraints<'smt, 'ctx, 'tcx: 'ctx>(
 
     // If we find a model for the template constraints, filter it to the template variables and create a mapping from it.
     if let Some(template_model) = model {
-        let mapping = create_subst_mapping(&template_model, translate);
+        let mapping = create_subst_mapping(idents, &template_model, translate);
         Ok(Some(mapping))
     } else {
         // No template model found;.
@@ -444,31 +453,23 @@ impl InsertAssumeForRanges {
             | StmtKind::Assert(_, e)
             | StmtKind::Assume(_, e)
             | StmtKind::Compare(_, e)
-            | StmtKind::Tick(e) =>
-                self.idents_in_expr(e),
+            | StmtKind::Tick(e) => self.idents_in_expr(e),
 
-            StmtKind::Var(decl) =>
-                decl.borrow()
-                    .init
-                    .as_ref()
-                    .map(|e| self.idents_in_expr(e))
-                    .unwrap_or_default(),
+            StmtKind::Var(decl) => decl
+                .borrow()
+                .init
+                .as_ref()
+                .map(|e| self.idents_in_expr(e))
+                .unwrap_or_default(),
 
-            StmtKind::If(cond, _, _)
-            | StmtKind::While(cond, _) =>
-                self.idents_in_expr(cond),
+            StmtKind::If(cond, _, _) | StmtKind::While(cond, _) => self.idents_in_expr(cond),
 
             _ => Vec::new(),
         }
     }
 
     // ---- Build assume for a variable range
-    fn make_range_assume(
-        &self,
-        span: Span,
-        ident: Ident,
-        range: &Range,
-    ) -> Stmt {
+    fn make_range_assume(&self, span: Span, ident: Ident, range: &Range) -> Stmt {
         let builder = ExprBuilder::new(Span::dummy_span());
 
         let var = builder.var_ty(ident.clone(), TyKind::UInt);
@@ -487,15 +488,9 @@ impl InsertAssumeForRanges {
             builder.uint(range.upper.into()),
         );
 
-        let conj = builder.binary(
-            BinOpKind::And,
-            Some(TyKind::Bool),
-            lower,
-            upper,
-        );
+        let conj = builder.binary(BinOpKind::And, Some(TyKind::Bool), lower, upper);
 
-        let embedded =
-            builder.unary(UnOpKind::Embed, Some(TyKind::EUReal), conj);
+        let embedded = builder.unary(UnOpKind::Embed, Some(TyKind::EUReal), conj);
 
         Spanned {
             span,
@@ -530,11 +525,13 @@ impl VisitorMut for InsertAssumeForRanges {
         // ---- Phase 3: rewrite locally
         if !assumes.is_empty() {
             println!("originally {s}");
-            let original =
-                std::mem::replace(&mut s.node, StmtKind::Seq(vec![]));
+            let original = std::mem::replace(&mut s.node, StmtKind::Seq(vec![]));
 
             let mut stmts = assumes;
-            stmts.push(Spanned { span, node: original });
+            stmts.push(Spanned {
+                span,
+                node: original,
+            });
 
             s.node = StmtKind::Seq(stmts);
             println!("after: {s}");
@@ -548,3 +545,16 @@ impl VisitorMut for InsertAssumeForRanges {
 }
 
 
+pub fn canonical_form(map: &IndexMap<Ident, Expr>) -> String {
+    let mut items: Vec<_> = map.iter().collect();
+
+    items.sort_by_key(|(ident, _)| ident.to_string());
+
+    items
+        .into_iter()
+        .map(|(ident, expr)| {
+            format!("{}={}", ident, expr)
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}

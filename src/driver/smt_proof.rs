@@ -416,7 +416,56 @@ impl<'ctx> SmtVcProveTask<'ctx> {
             quant_vc: self.quant_vc,
         })
     }
+
+
+    /// Run the solver(s) on this SMT formula.
+    pub fn no_slice_run_solver<'smt>(
+        self,
+        options: &VerifyCommand,
+        limits_ref: &LimitsRef,
+        name: &SourceUnitName,
+        ctx: &'ctx Context,
+        translate: &mut TranslateExprs<'smt, 'ctx>,
+        slice_vars: &SliceStmts,
+    ) -> Result<SmtVcProveResultNoSlice<'ctx>, CaesarError> {
+   
+    let mut prover = Prover::new(&ctx, IncrementalMode::Native);
+    if let Some(remaining) = limits_ref.time_left() {
+        prover.set_timeout(remaining);
+    }
+    // Add axioms and assumptions
+    // Maybe the bug is here?
+    translate.ctx.add_lit_axioms_to_prover(&mut prover);
+    translate
+        .ctx
+        .uninterpreteds()
+        .add_axioms_to_prover(&mut prover);
+    translate
+        .local_scope()
+        .add_assumptions_to_prover(&mut prover);
+
+    prover.add_provable(&self.vc);
+
+
+   
+    // Run solver & retrieve model if available
+   let result =  prover.check_proof();
+//    let result =  prover.check_sat();
+
+    let model = prover.get_model();
+
+        Ok(SmtVcProveResultNoSlice {
+            prove_result: result,
+            model,
+            quant_vc: self.quant_vc,
+        })
+    }
+
 }
+
+
+
+
 
 fn mk_valid_query_prover<'smt, 'ctx>(
     limits_ref: &LimitsRef,
@@ -501,6 +550,13 @@ pub struct SmtVcProveResult<'ctx> {
     slice_model: Option<SliceModel>,
     quant_vc: QuantVcProveTask,
 }
+
+pub struct SmtVcProveResultNoSlice<'ctx> {
+    pub prove_result: ProveResult,
+    pub(crate) model: Option<InstrumentedModel<'ctx>>,
+    quant_vc: QuantVcProveTask,
+}
+
 
 impl<'ctx> SmtVcProveResult<'ctx> {
     /// Print the result of the query to stdout.
