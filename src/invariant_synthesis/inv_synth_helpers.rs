@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{rc::Rc};
 
 use indexmap::{IndexMap, IndexSet};
 use num::{BigInt, BigRational};
@@ -11,20 +11,16 @@ use z3rro::{
 
 use crate::{
     ast::{
-        self,
-        visit::{walk_expr, walk_stmt, VisitorMut},
-        BinOp, BinOpKind, DeclKind, Direction, DomainSpec, Expr, ExprBuilder, ExprData, ExprKind,
-        Ident, Range, Shared, Span, Spanned, Stmt, StmtKind, TyKind, UnOpKind,
+        self, BinOpKind, DeclKind, Direction, DomainSpec, Expr, ExprBuilder, ExprData, ExprKind, Ident, Range, Shared, Span, Spanned, Stmt, StmtKind, TyKind, UnOpKind, visit::{VisitorMut, walk_expr, walk_stmt}
     },
     driver::{
         commands::verify::VerifyCommand, error::CaesarError, front::SourceUnit,
-        quant_proof::BoolVcProveTask, smt_proof::SmtVcProveTask,
+        quant_proof::{BoolVcProveTask, QuantVcProveTask}, smt_proof::SmtVcProveTask,
     },
     opt::unfolder::Unfolder,
     resource_limits::LimitsRef,
     smt::{
-        pretty_model::pretty_var_value, symbolic::Symbolic, translate_exprs::TranslateExprs,
-        uninterpreted::FuncEntry, SmtCtx,
+        SmtCtx, symbolic::Symbolic, translate_exprs::TranslateExprs, uninterpreted::FuncEntry
     },
     tyctx::TyCtx,
 };
@@ -179,7 +175,7 @@ pub fn create_subst_mapping<'ctx>(
             Symbolic::UReal(v) => {
                 let eval = v.eval(model);
                 eval.ok()
-                    .map(|r: BigRational| builder.frac_lit(r))
+                    .map(|r: BigRational| builder.frac_lit_not_extended(r))
             }
 
             Symbolic::EUReal(v) => v.eval(model).ok().map(|r| match r {
@@ -229,6 +225,8 @@ pub fn get_model_for_constraints<'smt, 'ctx, 'tcx: 'ctx>(
     constraints: BoolVcProveTask,
     translate: &mut TranslateExprs<'smt, 'ctx>,
     idents: IndexSet<Ident>,
+    ranges_constraints: Vec<BoolVcProveTask>,
+
 ) -> Result<Option<IndexMap<ast::symbol::Ident, Expr>>, CaesarError> {
     let constraints_prove_task = SmtVcProveTask::translate(constraints, translate);
     // if !options.opt_options.no_simplify {
@@ -250,13 +248,17 @@ pub fn get_model_for_constraints<'smt, 'ctx, 'tcx: 'ctx>(
         .local_scope()
         .add_assumptions_to_prover(&mut prover);
 
+        for constraint in ranges_constraints {
+            let smt_task = SmtVcProveTask::translate(constraint, translate);
+            prover.add_assumption(&smt_task.vc);
+        }
     // Add the verification condition. This should be checked for satisfiability.
     // Therefore, add_assumption is used (which just adds it as an smtlib assert)
     // vs. add_provable, which would negate it first.
     prover.add_assumption(&constraints_prove_task.vc);
 
-    println!("Constraints prove task");
-    println!("{}",prover.get_smtlib().into_string());
+    // println!("Constraints prove task");
+    // println!("{}",prover.get_smtlib().into_string());
 
     // Run solver & retrieve model if available
     prover.check_sat();
@@ -416,139 +418,6 @@ impl<'a> VisitorMut for InsertAssumeBeforeCalls<'a> {
     }
 }
 
-struct IdentUseCollector {
-    used: Vec<Ident>,
-}
-
-impl VisitorMut for IdentUseCollector {
-    type Err = ();
-
-    fn visit_expr(&mut self, e: &mut Expr) -> Result<(), Self::Err> {
-        if let ExprKind::Var(id) = &e.kind {
-            self.used.push(id.clone());
-        }
-        walk_expr(self, e)
-    }
-}
-
-pub struct InsertAssumeForRanges {
-    ranges: HashMap<Ident, Range>,
-    pub(crate) direction: Direction,
-}
-
-impl InsertAssumeForRanges {
-    pub fn new(direction: Direction) -> Self {
-        Self {
-            ranges: HashMap::new(),
-            direction,
-        }
-    }
-
-    // ---- Collect idents from a single expression
-    fn idents_in_expr(&self, e: &Expr) -> Vec<Ident> {
-        let mut collector = IdentUseCollector { used: Vec::new() };
-        let mut e_clone = e.clone();
-        collector.visit_expr(&mut e_clone).unwrap();
-        collector.used
-    }
-
-    // ---- Collect idents local to this statement only
-    fn local_used_idents(&self, s: &Stmt) -> Vec<Ident> {
-        match &s.node {
-            StmtKind::Assign(_, e)
-            | StmtKind::Assert(_, e)
-            | StmtKind::Assume(_, e)
-            | StmtKind::Compare(_, e)
-            | StmtKind::Tick(e) => self.idents_in_expr(e),
-
-            StmtKind::Var(decl) => decl
-                .borrow()
-                .init
-                .as_ref()
-                .map(|e| self.idents_in_expr(e))
-                .unwrap_or_default(),
-
-            StmtKind::If(cond, _, _) | StmtKind::While(cond, _) => self.idents_in_expr(cond),
-
-            _ => Vec::new(),
-        }
-    }
-
-    // ---- Build assume for a variable range
-    fn make_range_assume(&self, span: Span, ident: Ident, range: &Range) -> Stmt {
-        let builder = ExprBuilder::new(Span::dummy_span());
-
-        let var = builder.var_ty(ident.clone(), TyKind::UInt);
-
-        let lower = builder.binary(
-            BinOpKind::Le,
-            Some(TyKind::Bool),
-            builder.uint(range.lower.into()),
-            var.clone(),
-        );
-
-        let upper = builder.binary(
-            BinOpKind::Le,
-            Some(TyKind::Bool),
-            var,
-            builder.uint(range.upper.into()),
-        );
-
-        let conj = builder.binary(BinOpKind::And, Some(TyKind::Bool), lower, upper);
-
-        let embedded = builder.unary(UnOpKind::Embed, Some(TyKind::EUReal), conj);
-
-        Spanned {
-            span,
-            node: StmtKind::Assert(self.direction, embedded),
-        }
-    }
-}
-impl VisitorMut for InsertAssumeForRanges {
-    type Err = ();
-
-    fn visit_stmt(&mut self, s: &mut Stmt) -> Result<(), Self::Err> {
-        let span = s.span;
-
-        // ---- Phase 1: record ranges at variable declarations
-        if let StmtKind::Var(decl) = &s.node {
-            let decl = decl.borrow();
-            if let Some(range) = &decl.range {
-                self.ranges.insert(decl.name.clone(), range.clone());
-            }
-        }
-
-        // ---- Phase 2: collect local identifier uses
-        let used = self.local_used_idents(s);
-
-        let mut assumes = Vec::new();
-        for (id, range) in self.ranges.clone() {
-                assumes.push(self.make_range_assume(span, id.clone(), &range));
-        }
-
-        // ---- Phase 3: rewrite locally
-        if !assumes.is_empty() {
-            println!("originally {s}");
-            let original = std::mem::replace(&mut s.node, StmtKind::Seq(vec![]));
-
-            let mut stmts = assumes;
-            stmts.push(Spanned {
-                span,
-                node: original,
-            });
-
-            s.node = StmtKind::Seq(stmts);
-            println!("after: {s}");
-
-            return Ok(());
-        }
-
-        // ---- Phase 4: recurse
-        // walk_stmt(self, s)
-        Ok(())
-    }
-}
-
 pub fn canonical_form(map: &IndexMap<Ident, Expr>) -> String {
     let mut items: Vec<_> = map.iter().collect();
 
@@ -587,4 +456,60 @@ impl VisitorMut for PiecewiseLinearCounter {
 
         walk_expr(self, expr)
     }
+}
+
+
+pub fn create_range_constraint(ident: Ident, range: &Range) -> Expr {
+        let builder = ExprBuilder::new(Span::dummy_span());
+
+        let var = builder.var_ty(ident.clone(), TyKind::UInt);
+
+        let lower = builder.binary(
+            BinOpKind::Le,
+            Some(TyKind::Bool),
+            builder.uint(range.lower.into()),
+            var.clone(),
+        );
+
+        let upper = builder.binary(
+            BinOpKind::Le,
+            Some(TyKind::Bool),
+            var,
+            builder.uint(range.upper.into()),
+        );
+
+        builder.binary(BinOpKind::And, Some(TyKind::Bool), lower, upper)
+    }
+
+    pub fn range_constraints_to_bool_tasks(
+    constraints: Vec<Expr>,
+    dummy_quant: QuantVcProveTask
+) -> Vec<BoolVcProveTask> {
+
+    constraints
+        .into_iter()
+        .map(|constraint| BoolVcProveTask {
+            quant_vc: dummy_quant.clone(), // unused, but well-formed
+            vc: constraint,
+        })
+        .collect()
+}
+
+
+
+pub fn collect_ranges_from_decls(
+    declarations: &IndexMap<Ident, Rc<DeclKind>>,
+) -> IndexMap<Ident, Range> {
+    let mut ranges = IndexMap::new();
+
+    for (ident, decl) in declarations.iter() {
+        if let DeclKind::VarDecl(var_ref) = decl.as_ref() {
+            let var = var_ref.borrow();
+            if let Some(range) = &var.range {
+                ranges.insert(ident.clone(), range.clone());
+            }
+        }
+    }
+
+    ranges
 }

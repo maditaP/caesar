@@ -4,7 +4,9 @@ use crate::ast::util::{remove_casts, FreeVariableCollector};
 use crate::ast::visit::VisitorMut;
 use crate::ast::{Direction, Ident};
 use crate::invariant_synthesis::inv_synth_helpers::{
-    FunctionInliner, InsertAssumeBeforeCalls, InsertAssumeForRanges, PiecewiseLinearCounter, canonical_form, create_subst_mapping, get_functions_from_source_unit, get_model_for_constraints, subst_from_mapping
+    canonical_form, collect_ranges_from_decls, create_range_constraint, create_subst_mapping,
+    get_functions_from_source_unit, get_model_for_constraints, range_constraints_to_bool_tasks,
+    subst_from_mapping, FunctionInliner, InsertAssumeBeforeCalls, PiecewiseLinearCounter,
 };
 use crate::invariant_synthesis::template_gen::{build_template_expression, get_synth_functions};
 use crate::opt::unfolder::Unfolder;
@@ -98,12 +100,12 @@ fn synth_inv_main(
     user_files: &[FileId],
 ) -> Result<bool, CaesarError> {
     let start_total = Instant::now();
-    let mut split_count = 1;
+    let mut split_count = 1; // 0 to ignore guards on first iteration. Think about how to handle
     let mut num_proven: usize = 0;
     let mut num_failures: usize = 0;
-    let mut total_num_cegis_its = 0;
+    let mut num_cex = 0;
     const MAX_CEGIS_ITERS: usize = 3000;
-    let max_split_count: usize = options.synth_options.max_template_refinements.unwrap_or(30) + 1;
+    let max_split_count: usize = split_count + options.synth_options.max_template_refinements.unwrap_or(30);
     let mut template_satchecks = 0;
     let mut duration_template_building = Duration::new(0, 0);
 
@@ -168,22 +170,27 @@ fn synth_inv_main(
         // set requested global z3 options
         set_global_z3_params(options, &limits_ref);
 
-        // for synth_inv_unit in &mut synth_inv_units {
+        let mut visitor = InsertAssumeBeforeCalls {
+            func_idents: &target_funcs,
+            direction: Direction::Down,
+        };
+
         for item in module.items {
-            let mut visitor = InsertAssumeBeforeCalls {
-                func_idents: &target_funcs,
-                direction: Direction::Up, // or whatever is appropriate
-            };
-              let mut visitor = InsertAssumeForRanges::new(
-                Direction::Up, // or whatever is appropriate
-              );
-            let synth_inv_unit = if options.synth_options.only_well_defined {
-                item.flat_map(|unit| {
+            let synth_inv_unit = item.flat_map(|unit| {
+                if options.synth_options.only_well_defined {
                     CoreVerifyTask::from_source_unit2(unit, &mut depgraph, &mut visitor)
-                })
-            } else {
-                item.flat_map(|unit| CoreVerifyTask::from_source_unit(unit, &mut depgraph))
-            };
+                } else {
+                    CoreVerifyTask::from_source_unit(unit, &mut depgraph)
+                }
+            });
+
+            // let synth_inv_unit = if options.synth_options.only_well_defined {
+            //     item.flat_map(|unit| {
+            //         CoreVerifyTask::from_source_unit2(unit, &mut depgraph, &mut visitor)
+            //     })
+            // } else {
+            //     item.flat_map(|unit| CoreVerifyTask::from_source_unit(unit, &mut depgraph))
+            // };
 
             let Some(mut synth_inv_unit) = synth_inv_unit else {
                 continue;
@@ -346,7 +353,6 @@ fn synth_inv_main(
             let mut all_cexs: IndexSet<String> = [].into();
             let mut all_zems: IndexSet<String> = [].into();
             loop {
-                total_num_cegis_its += 1;
                 let start_check = Instant::now(); // Start the timer for template building
 
                 iteration += 1;
@@ -407,29 +413,6 @@ fn synth_inv_main(
                     &smt_ctx,
                 )?;
                 let mut bvc_tvars_inst_with_distance = bvc_tvars_inst.clone();
-
-                if options.synth_options.print_cegis_info {
-                    for (_synth_name, template_expr, _num_guards) in templates.iter() {
-                        let instantiated = subst_from_mapping(
-                            zero_extended_mapping.clone(),
-                            template_expr,
-                            &limits_ref.clone(),
-                            &smt_ctx,
-                        )?;
-
-                        let mut task = QuantVcProveTask {
-                            expr: instantiated,
-                            direction,
-                            deps: vcdeps.clone(),
-                        };
-
-                        task.remove_neutrals(&limits_ref, &tcx)?; // TODO these need to be counted
-                                                                  // println!("");
-                                                                  // println!("instantiated template");
-                                                                  // println!("{} := {}", synth_name, remove_casts(&task.expr));
-                                                                  // println!("");
-                    }
-                }
 
                 // The true distance constraint should be here
                 // "Does this verify or is there a counterexample (pvars) with a distance > 2 to the previous pvars "
@@ -504,12 +487,28 @@ fn synth_inv_main(
                 let bvc_tvars_inst_smttask_with_distance =
                     SmtVcProveTask::translate(bvc_tvars_inst_btask_with_distance, &mut translate);
 
+                // !! RANGES STUFF
+
+                let ranges = collect_ranges_from_decls(&tcx.declarations.borrow());
+
+                let ranges_constraints: Vec<Expr> = ranges
+                    .iter()
+                    .map(|(ident, range)| create_range_constraint(ident.clone(), range))
+                    .collect();
+
+                let ranges_bool_tasks =
+                    range_constraints_to_bool_tasks(ranges_constraints, vc_expr.clone());
+
+                for (ident, _type) in all_template_vars.clone() {
+                    translate.fresh(ident);
+                }
                 let result_verifier = bvc_tvars_inst_smttask_with_distance
                     .clone()
                     .no_slice_run_solver(
                         &limits_ref,
                         &ctx,
                         &mut translate,
+                        ranges_bool_tasks.clone(),
                     )?;
                 let prove_result_verifier_with_distance = result_verifier.prove_result;
 
@@ -519,6 +518,7 @@ fn synth_inv_main(
                             &limits_ref,
                             &ctx,
                             &mut translate,
+                            ranges_bool_tasks.clone(),
                         )?;
                         let prove_result_verifier = result_verifier.prove_result;
                         duration_check = start_check.elapsed() + duration_check; // Template instantiation time
@@ -582,10 +582,7 @@ fn synth_inv_main(
                                     );
 
                                     println!("Number of templates generated: {}", split_count + 1);
-                                    println!(
-                                        "Number of counterexamples checked {}",
-                                        total_num_cegis_its - 1
-                                    );
+                                    println!("Number of counterexamples checked {}", num_cex);
                                     println!(
                                 "Number of sat checks in template building {template_satchecks}"
                             );
@@ -594,11 +591,11 @@ fn synth_inv_main(
                                 }
 
                                 split_count = max_split_count + 1;
-                                println!(
-                            "After {iteration} CEGIS loop iterations, the following admissible invariants were found:"
-                        );
+                                println!("The following admissible invariants were found:");
                                 for (name, task) in instantiated_tasks.iter() {
-                                    println!("  {} := {}", name, remove_casts(&task.expr));
+                                    if options.synth_options.print_cegis_info {
+                                        println!("  {} := {}", name, remove_casts(&task.expr));
+                                    }
                                     let mut counter = PiecewiseLinearCounter::new();
                                     counter.visit_expr(&mut task.expr.clone());
                                     println!(
@@ -610,7 +607,7 @@ fn synth_inv_main(
                             }
 
                             ProveResult::Counterexample => {
-                                println!("cex");
+                                num_cex += 1;
                             }
                             ProveResult::Unknown(msg) => {
                                 num_failures += 1;
@@ -621,7 +618,7 @@ fn synth_inv_main(
                     }
 
                     ProveResult::Counterexample => {
-                        println!("cex");
+                        num_cex += 1;
                     }
                     ProveResult::Unknown(msg) => {
                         num_failures += 1;
@@ -668,7 +665,7 @@ fn synth_inv_main(
 
                     let cex_mapping_only_pvars: IndexMap<Ident, Expr> = cex_mapping
                         .iter()
-                        // .filter(|(key, _)| !template_idents.contains(key))
+                        // .filter(|(key, _)| !template_idents.contains(*key))
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
 
@@ -678,7 +675,8 @@ fn synth_inv_main(
                         &limits_ref.clone(),
                         &smt_ctx,
                     )?;
-                    println!("Adding constraint: {bvc_pvars_inst:?}");
+
+                    // println!("new constraint: {bvc_pvars_inst}");
 
                     // Add the new constraint to the constraint-set via conjunction
                     constraints = builder.binary(
@@ -704,6 +702,7 @@ fn synth_inv_main(
                         constraints_on_tvars_bool_task,
                         &mut translate,
                         template_idents.clone(),
+                        ranges_bool_tasks.clone(),
                     )? {
                         // Update template variable mapping; zero-extension happens at top of loop
                         tvar_mapping = mapping;
@@ -713,8 +712,8 @@ fn synth_inv_main(
                     }
 
                     println!(
-    "No template model found (with or without distance); stopping CEGIS loop after iteration {iteration}."
-);
+                        "No template model found; stopping CEGIS loop after iteration {iteration}."
+                    );
 
                     num_failures += 1;
                     break;

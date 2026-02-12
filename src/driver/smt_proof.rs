@@ -149,7 +149,10 @@ pub fn run_smt_prove_task(
     let mut translate = TranslateExprs::new(&smt_ctx);
     let mut vc_is_valid = SmtVcProveTask::translate(vc_is_valid, &mut translate);
 
-    println!("vc_is_valid after function encoding: {}", vc_is_valid.quant_vc.expr);
+    println!(
+        "vc_is_valid after function encoding: {}",
+        vc_is_valid.quant_vc.expr
+    );
     if !options.opt_options.no_simplify {
         vc_is_valid.simplify();
     }
@@ -417,53 +420,50 @@ impl<'ctx> SmtVcProveTask<'ctx> {
         })
     }
 
-
     /// Run the solver(s) on this SMT formula.
     pub fn no_slice_run_solver<'smt>(
         self,
         limits_ref: &LimitsRef,
         ctx: &'ctx Context,
         translate: &mut TranslateExprs<'smt, 'ctx>,
+        ranges_constraints: Vec<BoolVcProveTask>,
     ) -> Result<SmtVcProveResultNoSlice<'ctx>, CaesarError> {
-   
-    let mut prover = Prover::new(&ctx, IncrementalMode::Native);
-    if let Some(remaining) = limits_ref.time_left() {
-        prover.set_timeout(remaining);
-    }
-    // Add axioms and assumptions
-    // Maybe the bug is here?
-    translate.ctx.add_lit_axioms_to_prover(&mut prover);
-    translate
-        .ctx
-        .uninterpreteds()
-        .add_axioms_to_prover(&mut prover);
-    translate
-        .local_scope()
-        .add_assumptions_to_prover(&mut prover);
+        let mut prover = Prover::new(&ctx, IncrementalMode::Native);
+        if let Some(remaining) = limits_ref.time_left() {
+            prover.set_timeout(remaining);
+        }
+        // Add axioms and assumptions
 
-    prover.add_provable(&self.vc);
+        translate.ctx.add_lit_axioms_to_prover(&mut prover);
+        translate
+            .ctx
+            .uninterpreteds()
+            .add_axioms_to_prover(&mut prover);
 
+        translate
+            .local_scope()
+            .add_assumptions_to_prover(&mut prover);
+        for constraint in ranges_constraints {
+            let smt_task = SmtVcProveTask::translate(constraint, translate);
+            prover.add_assumption(&smt_task.vc);
+        }
 
-    println!("prover stuff {}", prover.get_smtlib().into_string());
-//    
-    // Run solver & retrieve model if available
-   let result =  prover.check_proof();
-//    let result =  prover.check_sat();
+        prover.add_provable(&self.vc);
 
-    let model = prover.get_model();
+        // println!("prover stuff {}", prover.get_smtlib().into_string());
+        //
+        // Run solver & retrieve model if available
+        let result = prover.check_proof();
+        //    let result =  prover.check_sat();
+
+        let model = prover.get_model();
 
         Ok(SmtVcProveResultNoSlice {
             prove_result: result,
             model,
-            quant_vc: self.quant_vc,
         })
     }
-
 }
-
-
-
-
 
 fn mk_valid_query_prover<'smt, 'ctx>(
     limits_ref: &LimitsRef,
@@ -552,9 +552,7 @@ pub struct SmtVcProveResult<'ctx> {
 pub struct SmtVcProveResultNoSlice<'ctx> {
     pub prove_result: ProveResult,
     pub(crate) model: Option<InstrumentedModel<'ctx>>,
-    quant_vc: QuantVcProveTask,
 }
-
 
 impl<'ctx> SmtVcProveResult<'ctx> {
     /// Print the result of the query to stdout.

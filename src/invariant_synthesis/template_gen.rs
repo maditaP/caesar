@@ -174,20 +174,12 @@ fn build_polynomial_combination(
             TyKind::UReal
         };
 
-    let mut final_expr = builder.ite(
-        Some(clamp_with_zero_type.clone()),
-        builder.binary(
-            BinOpKind::Ge,
-            Some(TyKind::Bool),
-            poly_with_const.clone(),
-            builder.zero_lit(&signed_output_type),
-        ),
+    let mut final_expr = 
         Shared::new(ExprData {
             kind: ExprKind::Call(clamp_with_zero_name, vec![poly_with_const.clone()]),
             ty: Some(clamp_with_zero_type.clone()),
             span: Span::dummy_span(),
-        }),
-        builder.zero_lit(&clamp_with_zero_type),
+        }
     );
 
     // let mut final_expr = Shared::new(ExprData {
@@ -564,12 +556,12 @@ pub fn build_template_expression<'smt, 'ctx>(
     };
 
     let mut bool_exprs: Vec<Shared<ExprData>> = [].into();
-    let mut var_map = [].into();
+    // let mut var_map = [].into();
     // Step 1: Collect Boolean conditions relevant to the inputs
-    if split_count >= 1 {
-        (bool_exprs, var_map) =
-            collect_relevant_bool_conditions(synth_val, vc_expr, mappings, tcx, limits_ref);
-    }
+    // if split_count >= 1 {
+    //     (bool_exprs, var_map) =
+    //         collect_relevant_bool_conditions(synth_val, vc_expr, mappings, tcx, limits_ref);
+    // }
 
     if bool_exprs.is_empty() {
         bool_exprs.push(builder.bool_lit(true));

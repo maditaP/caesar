@@ -179,7 +179,7 @@ impl QuantVcProveTask {
 
 /// The next step is a Boolean verification condition - it represents that the
 /// quantative verification conditions are true/false depending on the direction.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BoolVcProveTask {
     pub quant_vc: QuantVcProveTask,
     pub vc: Expr,
