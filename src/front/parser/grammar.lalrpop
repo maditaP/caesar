@@ -155,6 +155,10 @@ ExprKindFactor: ExprKind = {
 }
 
 ExprKindTerm: ExprKind = {
+     "clamp_with_zero" "(" <arg: Expr> ")" => ExprKind::Call(
+        Ident { name: Symbol::intern("clamp_with_zero"), span: Span::dummy_span() },
+        vec![arg],
+    ),
     "let" "(" <ident: Ident> "," <val: Expr> "," <expr: Expr> ")" => ExprKind::Subst(ident, val, expr),
     "ite" "(" <cond: Expr> "," <a: Expr> "," <b: Expr> ")" => ExprKind::Ite(cond, a, b),
     <call: ExprCall> => call,

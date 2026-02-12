@@ -174,13 +174,11 @@ fn build_polynomial_combination(
             TyKind::UReal
         };
 
-    let mut final_expr = 
-        Shared::new(ExprData {
-            kind: ExprKind::Call(clamp_with_zero_name, vec![poly_with_const.clone()]),
-            ty: Some(clamp_with_zero_type.clone()),
-            span: Span::dummy_span(),
-        }
-    );
+    let mut final_expr = Shared::new(ExprData {
+        kind: ExprKind::Call(clamp_with_zero_name, vec![poly_with_const.clone()]),
+        ty: Some(clamp_with_zero_type.clone()),
+        span: Span::dummy_span(),
+    });
 
     // let mut final_expr = Shared::new(ExprData {
     //     kind: ExprKind::Call(clamp_with_zero_name, vec![poly_with_const.clone()]),
@@ -206,11 +204,11 @@ pub fn collect_relevant_bool_conditions(
     let ctx = Context::new(&Config::default());
 
     let smt_ctx_local = SmtCtx::new(
-                    &ctx,
-                    &tcx,
-                    Box::new(AxiomaticFunctionEncoder::default()),
-                     DepConfig::SpecsOnly,
-                );
+        &ctx,
+        &tcx,
+        Box::new(AxiomaticFunctionEncoder::default()),
+        DepConfig::SpecsOnly,
+    );
     // param → program var
     let mut param_var_mapping: IndexMap<Ident, Ident> = IndexMap::new();
 
@@ -221,7 +219,6 @@ pub fn collect_relevant_bool_conditions(
         for mapping in &mappings {
             // All vars must be mapped
             if vars.iter().all(|v| mapping.contains_key(v)) {
-                
                 // Wrap boolean in substitutions
                 let wrapped =
                     subst_from_mapping(mapping.clone(), &b, &limits_ref.clone(), &smt_ctx_local)
@@ -254,14 +251,12 @@ fn collect_program_vars(expr: &Expr) -> indexmap::IndexSet<Ident> {
 
     vars
 }
-
-
-
 pub fn get_fix_region_splits<'ctx>(
-    ranged_vars: &[(Expr, Range)],
-    split_count: usize,
+    ranged_vars: &[(Expr, Range)], // program variables with precomputed numeric ranges
+    split_count: usize,            // number of uniform splits per variable
     builder: &mut ExprBuilder,
 ) -> Vec<Expr> {
+    // Trivial case
     if ranged_vars.is_empty() || split_count == 0 {
         return vec![builder.bool_lit(true)];
     }
@@ -269,10 +264,17 @@ pub fn get_fix_region_splits<'ctx>(
     let mut per_var_conditions: Vec<Vec<Expr>> = Vec::new();
 
     for (var, range) in ranged_vars {
-        let lower = BigRational::from_integer(BigInt::from(range.lower));
-        let upper = BigRational::from_integer(BigInt::from(range.upper));
-        let width = &upper - &lower;
+        let lower_int = range.lower;
+        let upper_int = range.upper;
 
+        // Total number of integer values in [lower, upper]
+        let total_values = upper_int - lower_int + 1;
+        let splits = split_count as u64;
+
+        let base_size = total_values / splits;
+        let remainder = total_values % splits;
+
+        // Ensure variable is in Real domain (same as your original code)
         let real_var = if var.ty.clone().unwrap() == TyKind::Real {
             var.clone()
         } else {
@@ -280,35 +282,35 @@ pub fn get_fix_region_splits<'ctx>(
         };
 
         let mut conditions_for_var = Vec::new();
+        let mut current_lower = lower_int;
 
-        for i in 0..split_count {
-            let lower_ratio = BigRational::new(i.into(), split_count.into());
-            let upper_ratio = BigRational::new((i + 1).into(), split_count.into());
+        for i in 0..splits {
+            // Distribute remainder over first intervals
+            let extra = if i < remainder { 1 } else { 0 };
+            let size = base_size + extra;
 
-            let lower_cut = &lower + &width * lower_ratio;
-            let upper_cut = &lower + &width * upper_ratio;
+            // If more splits than values, skip empty intervals
+            if size == 0 {
+                continue;
+            }
 
-            let lower_expr = builder.signed_frac_lit(lower_cut.clone());
-            let upper_expr = builder.signed_frac_lit(upper_cut.clone());
+            let current_upper = current_lower + size - 1;
 
-            let lower_pred = if i == 0 {
-                // First interval: include lower bound
-                builder.binary(
-                    BinOpKind::Ge,
-                    Some(TyKind::Bool),
-                    real_var.clone(),
-                    lower_expr,
-                )
-            } else {
-                builder.binary(
-                    BinOpKind::Gt,
-                    Some(TyKind::Bool),
-                    real_var.clone(),
-                    lower_expr,
-                )
-            };
+            // Convert integer cuts to BigRational (integer-valued)
+            let lower_cut = BigRational::from_integer(BigInt::from(current_lower));
+            let upper_cut = BigRational::from_integer(BigInt::from(current_upper));
 
-            let upper_pred = builder.binary(
+            let lower_expr = builder.signed_frac_lit(lower_cut);
+            let upper_expr = builder.signed_frac_lit(upper_cut);
+
+            let ge_lower = builder.binary(
+                BinOpKind::Ge,
+                Some(TyKind::Bool),
+                real_var.clone(),
+                lower_expr,
+            );
+
+            let le_upper = builder.binary(
                 BinOpKind::Le,
                 Some(TyKind::Bool),
                 real_var.clone(),
@@ -316,14 +318,17 @@ pub fn get_fix_region_splits<'ctx>(
             );
 
             let interval_pred =
-                builder.binary(BinOpKind::And, Some(TyKind::Bool), lower_pred, upper_pred);
+                builder.binary(BinOpKind::And, Some(TyKind::Bool), ge_lower, le_upper);
 
             conditions_for_var.push(interval_pred);
+
+            current_lower = current_upper + 1;
         }
 
         per_var_conditions.push(conditions_for_var);
     }
 
+    // Cartesian product across variables
     cartesian_and(&per_var_conditions, builder)
 }
 

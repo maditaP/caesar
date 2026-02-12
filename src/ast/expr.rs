@@ -2,6 +2,7 @@
 
 use num::Signed;
 use num::{BigInt, BigRational, BigUint, One, Zero};
+use z3::ast::Int;
 use std::{fmt, str::FromStr};
 
 use crate::{
@@ -676,6 +677,14 @@ impl ExprBuilder {
         Shared::new(ExprData {
             kind: ExprKind::Lit(Spanned::new(self.span, LitKind::Infinity)),
             ty: Some(TyKind::EUReal),
+            span: self.span,
+        })
+    }
+
+     pub fn int_lit(&self, value: BigInt) -> Expr {
+        Shared::new(ExprData {
+            kind: ExprKind::Lit(Spanned::new(self.span, LitKind::Int(value))),
+            ty: Some(TyKind::Int),
             span: self.span,
         })
     }
