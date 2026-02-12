@@ -255,58 +255,32 @@ fn collect_program_vars(expr: &Expr) -> indexmap::IndexSet<Ident> {
     vars
 }
 
-/// Construct Boolean predicates that partition each ranged variable into
-/// a fixed number of contiguous regions, then take the Cartesian product
-/// across variables.
-///
-/// Each variable is split into `split_count` intervals over its numeric range.
-/// ([lower_bound,upper_bound])
-/// For each interval we generate a predicate of the form:
-///
-///     (var > lower_cut) && (var <= upper_cut)
-///
-/// To not exclude var = lower_bound we also include the "interval" var = lower_bound
-/// The final result is the conjunction of one region predicate per variable,
-/// enumerated via a Cartesian product.
+
+
 pub fn get_fix_region_splits<'ctx>(
-    ranged_vars: &[(Expr, Range)], // program variables with precomputed numeric ranges
-    split_count: usize,            // number of uniform splits per variable
+    ranged_vars: &[(Expr, Range)],
+    split_count: usize,
     builder: &mut ExprBuilder,
 ) -> Vec<Expr> {
-    // Trivial case:
-    //  - no variables, or
-    //  - zero requested splits
-    //
-    // In both cases, return a single unconstrained region (true).
     if ranged_vars.is_empty() || split_count == 0 {
         return vec![builder.bool_lit(true)];
     }
 
-    // For each variable, build a list of mutually exclusive region predicates.
     let mut per_var_conditions: Vec<Vec<Expr>> = Vec::new();
 
     for (var, range) in ranged_vars {
-        // Convert integer bounds into rationals so we can compute fractional cuts.
         let lower = BigRational::from_integer(BigInt::from(range.lower));
         let upper = BigRational::from_integer(BigInt::from(range.upper));
         let width = &upper - &lower;
 
-        // All interval arithmetic is done in the Real domain.
         let real_var = if var.ty.clone().unwrap() == TyKind::Real {
             var.clone()
         } else {
             builder.cast(TyKind::Real, var.clone())
         };
 
-        // Region predicates corresponding to this single variable.
         let mut conditions_for_var = Vec::new();
 
-        // Generate `split_count` contiguous intervals over [lower, upper].
-        //
-        // Interval i corresponds to:
-        //   (lower + i/split_count * width,
-        //    lower + (i+1)/split_count * width]
-        //
         for i in 0..split_count {
             let lower_ratio = BigRational::new(i.into(), split_count.into());
             let upper_ratio = BigRational::new((i + 1).into(), split_count.into());
@@ -314,17 +288,27 @@ pub fn get_fix_region_splits<'ctx>(
             let lower_cut = &lower + &width * lower_ratio;
             let upper_cut = &lower + &width * upper_ratio;
 
-            let lower_expr = builder.signed_frac_lit(lower_cut);
-            let upper_expr = builder.signed_frac_lit(upper_cut);
+            let lower_expr = builder.signed_frac_lit(lower_cut.clone());
+            let upper_expr = builder.signed_frac_lit(upper_cut.clone());
 
-            let gt_lower = builder.binary(
-                BinOpKind::Gt,
-                Some(TyKind::Bool),
-                real_var.clone(),
-                lower_expr,
-            );
+            let lower_pred = if i == 0 {
+                // First interval: include lower bound
+                builder.binary(
+                    BinOpKind::Ge,
+                    Some(TyKind::Bool),
+                    real_var.clone(),
+                    lower_expr,
+                )
+            } else {
+                builder.binary(
+                    BinOpKind::Gt,
+                    Some(TyKind::Bool),
+                    real_var.clone(),
+                    lower_expr,
+                )
+            };
 
-            let le_upper = builder.binary(
+            let upper_pred = builder.binary(
                 BinOpKind::Le,
                 Some(TyKind::Bool),
                 real_var.clone(),
@@ -332,27 +316,14 @@ pub fn get_fix_region_splits<'ctx>(
             );
 
             let interval_pred =
-                builder.binary(BinOpKind::And, Some(TyKind::Bool), gt_lower, le_upper);
+                builder.binary(BinOpKind::And, Some(TyKind::Bool), lower_pred, upper_pred);
 
             conditions_for_var.push(interval_pred);
         }
 
-        //   var == lower
-        let lower_eq = builder.binary(
-            BinOpKind::Eq,
-            Some(TyKind::Bool),
-            real_var.clone(),
-            builder.signed_frac_lit(lower),
-        );
-
-        conditions_for_var.push(lower_eq);
-
-        // Store all regions for this variable.
         per_var_conditions.push(conditions_for_var);
     }
 
-    // Combine per-variable region predicates into full region conditions
-    // by taking the Cartesian product and conjoining each combination.
     cartesian_and(&per_var_conditions, builder)
 }
 
