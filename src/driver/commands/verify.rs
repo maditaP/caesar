@@ -4,7 +4,7 @@ use clap::Args;
 use z3rro::{prover::ProveResult, util::ReasonUnknown};
 
 use crate::{
-    ast::FileId,
+    ast::{Expr, FileId},
     driver::{
         commands::{
             mk_cli_server,
@@ -20,7 +20,10 @@ use crate::{
         front::parse_and_tycheck,
         item::Item,
         quant_proof::lower_quant_prove_task,
-        smt_proof::{run_smt_prove_task, set_global_z3_params},
+        smt_proof::{run_smt_prove_task, run_smt_prove_task_with_ranges, set_global_z3_params},
+    },
+    invariant_synthesis::inv_synth_helpers::{
+        collect_ranges_from_decls, create_range_constraint, range_constraints_to_bool_tasks,
     },
     resource_limits::{LimitError, LimitsRef, await_with_resource_limits},
     servers::{Server, SharedServer},
@@ -48,7 +51,7 @@ pub struct VerifyCommand {
 
     #[command(flatten)]
     pub debug_options: DebugOptions,
-    
+
     #[command(flatten)]
     pub synth_options: SynthesizerOptions,
 }
@@ -255,10 +258,20 @@ fn verify_files_main(
         // Lowering the quantitative task to a Boolean one. This contains (lazy)
         // unfolding, quantifier elimination, and various optimizations
         // (depending on options).
-        let vc_is_valid = lower_quant_prove_task(options, &limits_ref, &mut tcx, name, vc_expr)?;
+        let vc_is_valid = lower_quant_prove_task(options, &limits_ref, &mut tcx, name, vc_expr.clone())?;
+
+        let ranges = collect_ranges_from_decls(&tcx.declarations.borrow());
+
+        let ranges_constraints: Vec<Expr> = ranges
+            .iter()
+            .map(|(ident, range)| create_range_constraint(ident.clone(), range))
+            .collect();
+
+        let ranges_bool_tasks =
+            range_constraints_to_bool_tasks(ranges_constraints, vc_expr.clone());
 
         // Running the SMT prove task: translating to Z3, running the solver.
-        let result = run_smt_prove_task(
+        let result = run_smt_prove_task_with_ranges(
             options,
             &limits_ref,
             &tcx,
@@ -267,6 +280,7 @@ fn verify_files_main(
             server,
             slice_vars,
             vc_is_valid,
+            ranges_bool_tasks,
         )?;
 
         // Handle reasons to stop the verifier.

@@ -122,13 +122,13 @@ impl<'ctx> FunctionEncoder<'ctx> for AxiomaticFunctionEncoder {
         }
 
         let scope = self.inputs_scope(translate, func);
-        axioms.extend(translate_return_invariant(
-            self.axiom_instantiation,
-            &scope,
-            translate,
-            func,
-            &format!("{}(return_invariant)", func.name),
-        ));
+        // axioms.extend(translate_return_invariant(
+        //     self.axiom_instantiation,
+        //     &scope,
+        //     translate,
+        //     func,
+        //     &format!("{}(return_invariant)", func.name),
+        // ));
         axioms
     }
 

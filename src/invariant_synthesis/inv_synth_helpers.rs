@@ -1,27 +1,30 @@
-use std::{rc::Rc};
+use std::{rc::Rc, time::Instant};
 
 use indexmap::{IndexMap, IndexSet};
 use num::{BigInt, BigRational};
 
+use z3::{Context, Goal};
 use z3rro::{
-    eureal::ConcreteEUReal,
-    model::{InstrumentedModel, SmtEval},
-    prover::{IncrementalMode, Prover},
+    eureal::ConcreteEUReal, model::{InstrumentedModel, SmtEval}, probes::ProbeSummary, prover::{IncrementalMode, Prover}
 };
 
 use crate::{
     ast::{
-        self, BinOpKind, DeclKind, Direction, DomainSpec, Expr, ExprBuilder, ExprData, ExprKind, Ident, Range, Shared, Span, Spanned, Stmt, StmtKind, TyKind, UnOpKind, visit::{VisitorMut, walk_expr, walk_stmt}
+        self,
+        visit::{walk_expr, walk_stmt, VisitorMut},
+        BinOpKind, DeclKind, Direction, DomainSpec, Expr, ExprBuilder, ExprData, ExprKind, Ident,
+        Range, Shared, Span, Spanned, Stmt, StmtKind, TyKind, UnOpKind,
     },
     driver::{
-        commands::verify::VerifyCommand, error::CaesarError, front::SourceUnit,
-        quant_proof::{BoolVcProveTask, QuantVcProveTask}, smt_proof::SmtVcProveTask,
+        commands::verify::VerifyCommand,
+        error::CaesarError,
+        front::SourceUnit,
+        quant_proof::{BoolVcProveTask, QuantVcProveTask},
+        smt_proof::SmtVcProveTask,
     },
     opt::unfolder::Unfolder,
     resource_limits::LimitsRef,
-    smt::{
-        SmtCtx, symbolic::Symbolic, translate_exprs::TranslateExprs, uninterpreted::FuncEntry
-    },
+    smt::{symbolic::Symbolic, translate_exprs::TranslateExprs, uninterpreted::FuncEntry, SmtCtx},
     tyctx::TyCtx,
 };
 // Takes a function and substitutes calls to that function with the functions body,
@@ -217,64 +220,147 @@ pub fn subst_from_mapping<'ctx>(
     Ok(wrapped)
 }
 
-/// Get a model for a BoolVcProveTask representing a constraint and return it as a hashmap
 pub fn get_model_for_constraints<'smt, 'ctx, 'tcx: 'ctx>(
-    ctx: &'ctx z3::Context,
+    prover: &mut Prover<'ctx>,
     options: &VerifyCommand,
-    limits_ref: &LimitsRef,
     constraints: BoolVcProveTask,
     translate: &mut TranslateExprs<'smt, 'ctx>,
     idents: IndexSet<Ident>,
-    ranges_constraints: Vec<BoolVcProveTask>,
-
+    ctx: &'ctx Context,
 ) -> Result<Option<IndexMap<ast::symbol::Ident, Expr>>, CaesarError> {
-    let constraints_prove_task = SmtVcProveTask::translate(constraints, translate);
-    // if !options.opt_options.no_simplify {
-    //     constraints_prove_task.simplify();
-    // }
-    let mut prover = Prover::new(&ctx, IncrementalMode::Native);
-    if let Some(remaining) = limits_ref.time_left() {
-        prover.set_timeout(remaining);
+    // Translate only the NEW constraint
+    let mut constraints_prove_task = SmtVcProveTask::translate(constraints, translate);
+
+    if !options.opt_options.no_simplify {
+        constraints_prove_task.simplify();
     }
 
-    // Add axioms and assumptions
-    // Maybe the bug is here?
-    translate.ctx.add_lit_axioms_to_prover(&mut prover);
-    translate
-        .ctx
-        .uninterpreteds()
-        .add_axioms_to_prover(&mut prover);
-    translate
-        .local_scope()
-        .add_assumptions_to_prover(&mut prover);
+    prover.push();
 
-        for constraint in ranges_constraints {
-            let smt_task = SmtVcProveTask::translate(constraint, translate);
-            prover.add_assumption(&smt_task.vc);
-        }
-    // Add the verification condition. This should be checked for satisfiability.
-    // Therefore, add_assumption is used (which just adds it as an smtlib assert)
-    // vs. add_provable, which would negate it first.
     prover.add_assumption(&constraints_prove_task.vc);
 
-    // println!("Constraints prove task");
-    // println!("{}",prover.get_smtlib().into_string());
+    // println!("Current solver state for constraints:");
+    // println!("{}", prover.get_smtlib().into_string());
 
-    // Run solver & retrieve model if available
-    prover.check_sat();
+    let total_start = Instant::now();
 
-    let model = prover.get_model();
+     if options.debug_options.z3_probe {
+            let goal = Goal::new(ctx, false, false, false);
+            for assertion in prover.get_assertions() {
+                goal.assert(&assertion);
+            }
+            eprintln!(
+                "Probe results: {}",
+                ProbeSummary::probe(ctx, &goal)
+            );
+        }
+    let res = prover.check_sat();
 
+    // println!("check_sat result: {:?}", res);
 
-    // If we find a model for the tema checplate constraints, filter it to the template variables and create a mapping from it.
-    if let Some(template_model) = model {
-        let mapping = create_subst_mapping(idents, &template_model, translate);
+    // match res {
+    //     z3::SatResult::Unsat => {
+    //         println!("unsat");
+    //         println!("TIME: (constraint) total solving time: {:.3?}", total_start.elapsed());
+    //         return Ok(None);
+    //     }
+    //     z3::SatResult::Unknown => {
+    //         println!("unknown: {:?}", prover.get_reason_unknown().unwrap());
+    //         println!("TIME: (constraint) total solving time: {:.3?}", total_start.elapsed());
+    //         return Ok(None);
+    //     }
+    //     z3::SatResult::Sat => {
+    //         println!("sat");
+    //         println!("TIME: (constraint) check_sat took: {:.3?}", total_start.elapsed());
+
+    //     }
+    // }
+
+    // --------------------
+    // Measure get_model()
+    // --------------------
+    let model_start = Instant::now();
+    let model_opt = prover.get_model();
+    let model_duration = model_start.elapsed();
+
+    // println!("TIME (constraint): get_model took: {:.3?}", model_duration);
+    // println!("TIME (constraint): total solving time: {:.3?}", total_start.elapsed());
+
+    if let Some(model) = model_opt {
+        prover.pop();
+        prover.add_assumption(&constraints_prove_task.vc);
+
+        let mapping = create_subst_mapping(idents, &model, translate);
         Ok(Some(mapping))
     } else {
-        // No template model found;.
         Ok(None)
     }
 }
+
+// /// Get a model for a BoolVcProveTask representing a constraint and return it as a hashmap
+// pub fn get_model_for_constraints<'smt, 'ctx, 'tcx: 'ctx>(
+//     ctx: &'ctx z3::Context,
+//     options: &VerifyCommand,
+//     limits_ref: &LimitsRef,
+//     constraints: BoolVcProveTask,
+//     translate: &mut TranslateExprs<'smt, 'ctx>,
+//     idents: IndexSet<Ident>,
+//     ranges_constraints: Vec<BoolVcProveTask>,
+
+// ) -> Result<Option<IndexMap<ast::symbol::Ident, Expr>>, CaesarError> {
+//     let mut constraints_prove_task = SmtVcProveTask::translate(constraints, translate);
+//     if  !options.opt_options.no_simplify {
+//         constraints_prove_task.simplify();
+//     }
+//     let mut prover = Prover::new(&ctx, IncrementalMode::Emulated);
+//     // if let Some(remaining) = limits_ref.time_left() {
+//     //     prover.set_timeout(remaining);
+//     // }
+
+//     // Add axioms and assumptions
+//     // Maybe the bug is here?
+//     translate.ctx.add_lit_axioms_to_prover(&mut prover);
+//     translate
+//         .ctx
+//         .uninterpreteds()
+//         .add_axioms_to_prover(&mut prover);
+//     translate
+//         .local_scope()
+//         .add_assumptions_to_prover(&mut prover);
+
+//         for constraint in ranges_constraints {
+//             let smt_task = SmtVcProveTask::translate(constraint, translate);
+//             prover.add_assumption(&smt_task.vc);
+//         }
+//     // Add the verification condition. This should be checked for satisfiability.
+//     // Therefore, add_assumption is used (which just adds it as an smtlib assert)
+//     // vs. add_provable, which would negate it first.
+//     prover.add_assumption(&constraints_prove_task.vc);
+
+//     println!("Constraints prove task");
+//     println!("{}",prover.get_smtlib().into_string());
+
+//     // Run solver & retrieve model if available
+//     let res: z3::SatResult = prover.check_sat();
+//     println!("after check sat");
+//     println!("{:?}",res);
+
+//     match res {
+//             z3::SatResult::Unsat => println!("unsat"),
+//             z3::SatResult::Unknown => println!("unknown: {:?}",prover.get_reason_unknown().unwrap()),
+//             z3::SatResult::Sat => println!("sat")
+//         }
+//     let model = prover.get_model();
+
+//     // If we find a model for the tema checplate constraints, filter it to the template variables and create a mapping from it.
+//     if let Some(template_model) = model {
+//         let mapping = create_subst_mapping(idents, &template_model, translate);
+//         Ok(Some(mapping))
+//     } else {
+//         // No template model found;.
+//         Ok(None)
+//     }
+// }
 
 pub fn get_functions_from_source_unit(source_unit: &SourceUnit) -> Vec<Ident> {
     let mut funcs = Vec::new();
@@ -458,34 +544,32 @@ impl VisitorMut for PiecewiseLinearCounter {
     }
 }
 
-
 pub fn create_range_constraint(ident: Ident, range: &Range) -> Expr {
-        let builder = ExprBuilder::new(Span::dummy_span());
+    let builder = ExprBuilder::new(Span::dummy_span());
 
-        let var = builder.var_ty(ident.clone(), TyKind::UInt);
+    let var = builder.var_ty(ident.clone(), TyKind::UInt);
 
-        let lower = builder.binary(
-            BinOpKind::Le,
-            Some(TyKind::Bool),
-            builder.uint(range.lower.into()),
-            var.clone(),
-        );
+    let lower = builder.binary(
+        BinOpKind::Le,
+        Some(TyKind::Bool),
+        builder.uint(range.lower.into()),
+        var.clone(),
+    );
 
-        let upper = builder.binary(
-            BinOpKind::Le,
-            Some(TyKind::Bool),
-            var,
-            builder.uint(range.upper.into()),
-        );
+    let upper = builder.binary(
+        BinOpKind::Le,
+        Some(TyKind::Bool),
+        var,
+        builder.uint(range.upper.into()),
+    );
 
-        builder.binary(BinOpKind::And, Some(TyKind::Bool), lower, upper)
-    }
+    builder.binary(BinOpKind::And, Some(TyKind::Bool), lower, upper)
+}
 
-    pub fn range_constraints_to_bool_tasks(
+pub fn range_constraints_to_bool_tasks(
     constraints: Vec<Expr>,
-    dummy_quant: QuantVcProveTask
+    dummy_quant: QuantVcProveTask,
 ) -> Vec<BoolVcProveTask> {
-
     constraints
         .into_iter()
         .map(|constraint| BoolVcProveTask {
@@ -494,8 +578,6 @@ pub fn create_range_constraint(ident: Ident, range: &Range) -> Expr {
         })
         .collect()
 }
-
-
 
 pub fn collect_ranges_from_decls(
     declarations: &IndexMap<Ident, Rc<DeclKind>>,

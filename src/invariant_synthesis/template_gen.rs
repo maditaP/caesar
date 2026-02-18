@@ -532,12 +532,12 @@ pub fn build_template_expression<'smt, 'ctx>(
     };
 
     let mut bool_exprs: Vec<Shared<ExprData>> = [].into();
-    // let mut var_map = [].into();
+    let mut var_map = [].into();
     // Step 1: Collect Boolean conditions relevant to the inputs
-    // if split_count >= 1 {
-    //     (bool_exprs, var_map) =
-    //         collect_relevant_bool_conditions(synth_val, vc_expr, mappings, tcx, limits_ref);
-    // }
+    if split_count >= 1 {
+        (bool_exprs, var_map) =
+            collect_relevant_bool_conditions(synth_val, vc_expr, mappings, tcx, limits_ref);
+    }
 
     if bool_exprs.is_empty() {
         bool_exprs.push(builder.bool_lit(true));

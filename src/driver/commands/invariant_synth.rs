@@ -27,7 +27,7 @@ use crate::{
 };
 use indexmap::{IndexMap, IndexSet};
 use z3::{Config, Context};
-use z3rro::prover::ProveResult;
+use z3rro::prover::{IncrementalMode, ProveResult, Prover};
 /// The inner loop of the invariant synthesis procedure.
 ///
 /// This loop refines candidate invariants iteratively through several phases:
@@ -105,7 +105,8 @@ fn synth_inv_main(
     let mut num_failures: usize = 0;
     let mut num_cex = 0;
     const MAX_CEGIS_ITERS: usize = 3000;
-    let max_split_count: usize = split_count + options.synth_options.max_template_refinements.unwrap_or(30);
+    let max_split_count: usize =
+        split_count + options.synth_options.max_template_refinements.unwrap_or(30);
     let mut template_satchecks = 0;
     let mut duration_template_building = Duration::new(0, 0);
 
@@ -209,7 +210,7 @@ fn synth_inv_main(
             // spec call desugaring, preparing slicing, and verification condition
             // generation.
 
-            let (mut vc_expr, _slice_vars) = lower_core_verify_task(
+            let (mut vc_expr, slice_vars) = lower_core_verify_task(
                 &mut tcx,
                 name,
                 options,
@@ -352,6 +353,8 @@ fn synth_inv_main(
 
             let mut all_cexs: IndexSet<String> = [].into();
             let mut all_zems: IndexSet<String> = [].into();
+            let mut prover = Prover::new(&ctx, IncrementalMode::Native);
+
             loop {
                 let start_check = Instant::now(); // Start the timer for template building
 
@@ -396,7 +399,7 @@ fn synth_inv_main(
                 let stringified_map = canonical_form(&zero_extended_mapping);
                 if !all_zems.insert(stringified_map.clone()) {
                     return Err(CaesarError::UserError(
-                        "Counterexample appeared twice".into(),
+                        "Tvar mapping appeared twice".into(),
                     ));
                 }
                 // for (ident, expr) in &zero_extended_mapping {
@@ -499,15 +502,18 @@ fn synth_inv_main(
                 let ranges_bool_tasks =
                     range_constraints_to_bool_tasks(ranges_constraints, vc_expr.clone());
 
-                for (ident, _type) in all_template_vars.clone() {
-                    translate.fresh(ident);
-                }
+                // for (ident, _type) in all_template_vars.clone() {
+                //     translate.fresh(ident);
+                // }
                 let result_verifier = bvc_tvars_inst_smttask_with_distance
                     .clone()
-                    .no_slice_run_solver(
+                    .run_solver_with_ranges(
+                        options,
                         &limits_ref,
+                        name,
                         &ctx,
                         &mut translate,
+                        &slice_vars,
                         ranges_bool_tasks.clone(),
                     )?;
                 let prove_result_verifier_with_distance = result_verifier.prove_result;
@@ -515,6 +521,7 @@ fn synth_inv_main(
                 match prove_result_verifier_with_distance {
                     ProveResult::Proof => {
                         let result_verifier = bvc_tvars_inst_smttask.clone().no_slice_run_solver(
+                            options,
                             &limits_ref,
                             &ctx,
                             &mut translate,
@@ -669,6 +676,23 @@ fn synth_inv_main(
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
 
+                    if iteration == 1 {
+                        // Add static axioms once
+                        translate.ctx.add_lit_axioms_to_prover(&mut prover);
+                        translate
+                            .ctx
+                            .uninterpreteds()
+                            .add_axioms_to_prover(&mut prover);
+                        translate
+                            .local_scope()
+                            .add_assumptions_to_prover(&mut prover);
+
+                        // Add range constraints once
+                        for constraint in ranges_bool_tasks.clone() {
+                            let smt_task = SmtVcProveTask::translate(constraint, &mut translate);
+                            prover.add_assumption(&smt_task.vc);
+                        }
+                    }
                     let bvc_pvars_inst = subst_from_mapping(
                         cex_mapping_only_pvars,
                         &boolean_vc.vc,
@@ -679,30 +703,30 @@ fn synth_inv_main(
                     // println!("new constraint: {bvc_pvars_inst}");
 
                     // Add the new constraint to the constraint-set via conjunction
-                    constraints = builder.binary(
-                        BinOpKind::And,
-                        Some(TyKind::Bool),
-                        bvc_pvars_inst,
-                        constraints,
-                    );
+                    // constraints = builder.binary(
+                    //     BinOpKind::And,
+                    //     Some(TyKind::Bool),
+                    //     bvc_pvars_inst,
+                    //     constraints,
+                    // );
 
                     // constraints = new_constraint.vc;
 
                     // Create a Boolean verification task from the constraints
                     let constraints_on_tvars_bool_task = BoolVcProveTask {
                         quant_vc: vc_expr.clone(), // This is a random quant_task and should not!! be used
-                        vc: constraints.clone(),
+                        vc: bvc_pvars_inst.clone(),
                     };
 
+                    
                     // --- Phase 3: Evaluate template variables in original vc ---
                     if let Some(mapping) = get_model_for_constraints(
-                        &ctx,
+                        &mut prover,
                         options,
-                        &limits_ref,
                         constraints_on_tvars_bool_task,
                         &mut translate,
                         template_idents.clone(),
-                        ranges_bool_tasks.clone(),
+                        &ctx,
                     )? {
                         // Update template variable mapping; zero-extension happens at top of loop
                         tvar_mapping = mapping;

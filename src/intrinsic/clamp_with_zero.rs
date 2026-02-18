@@ -72,7 +72,8 @@ impl FuncIntrin for ClampWithZeroIntrin {
                 let cond = x.gt(&zero);
                 // let value = UReal::from_uint(&UInt::unchecked_from_int(cond.ite(&x, &zero)));
 
-                Symbolic::UInt(UInt::unchecked_from_int(cond.ite(&x, &zero)))
+                // Symbolic::UInt(UInt::unchecked_from_int(cond.ite(&x, &zero)))
+                Symbolic::UInt(UInt::unchecked_from_int(x))
             }
 
             Some(TyKind::UInt) => {
@@ -85,7 +86,8 @@ impl FuncIntrin for ClampWithZeroIntrin {
                 let cond = x.gt(&zero);
                 // let value = UReal::from_uint(&UInt::unchecked_from_int(cond.ite(&x, &zero)));
 
-                Symbolic::UInt(UInt::unchecked_from_int(cond.ite(&x, &zero)))
+                Symbolic::UInt(UInt::unchecked_from_int(x.clone()))
+                // Symbolic::UInt(UInt::unchecked_from_int(cond.ite(&x, &zero)))
             }
 
             Some(TyKind::Real) => {
@@ -95,7 +97,8 @@ impl FuncIntrin for ClampWithZeroIntrin {
 
                 let cond = x.gt(&zero);
 
-                let value = UReal::unchecked_from_real(cond.ite(&x, &zero));
+                let value = UReal::unchecked_from_real(x);
+                // let value = UReal::unchecked_from_real(cond.ite(&x, &zero));
 
                 Symbolic::UReal(value)
             }
@@ -108,7 +111,8 @@ impl FuncIntrin for ClampWithZeroIntrin {
 
                 let cond = x.gt(&zero);
 
-                let value = UReal::unchecked_from_real(cond.ite(&x, &zero));
+                let value = UReal::unchecked_from_real(x.clone());
+                // let value = UReal::unchecked_from_real(cond.ite(&x, &zero));
 
                 Symbolic::UReal(value)
             }
@@ -123,7 +127,8 @@ impl FuncIntrin for ClampWithZeroIntrin {
 
                 let cond = x.gt(&zero);
 
-                let value = UReal::unchecked_from_real(cond.ite(&x, &zero));
+                let value = UReal::unchecked_from_real(x.clone());
+                // let value = UReal::unchecked_from_real(cond.ite(&x, &zero));
 
                 Symbolic::UReal(value)
             }

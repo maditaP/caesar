@@ -2,6 +2,7 @@
 
 use std::fs::{create_dir_all, File};
 use std::io::Write;
+use std::time::Instant;
 
 use ariadne::ReportKind;
 use itertools::Itertools;
@@ -163,6 +164,46 @@ pub fn run_smt_prove_task(
 
     let mut result =
         vc_is_valid.run_solver(options, limits_ref, name, &ctx, &mut translate, &slice_vars)?;
+
+    server
+        .handle_vc_check_result(name, &mut result, &mut translate)
+        .map_err(CaesarError::ServerError)?;
+
+    Ok(result.prove_result)
+}
+
+pub fn run_smt_prove_task_with_ranges(
+    options: &VerifyCommand,
+    limits_ref: &LimitsRef,
+    tcx: &TyCtx,
+    depgraph: &DepGraph,
+    name: &SourceUnitName,
+    server: &mut dyn Server,
+    slice_vars: SliceStmts,
+    vc_is_valid: BoolVcProveTask,
+    ranges_constraints: Vec<BoolVcProveTask>,
+) -> Result<ProveResult, CaesarError> {
+    let ctx = Context::new(&z3::Config::default());
+    let function_encoder = mk_function_encoder(tcx, depgraph, options)?;
+    let dep_config = DepConfig::Set(vc_is_valid.get_dependencies());
+    let smt_ctx = SmtCtx::new(&ctx, tcx, function_encoder, dep_config);
+    let mut translate = TranslateExprs::new(&smt_ctx);
+    let mut vc_is_valid = SmtVcProveTask::translate(vc_is_valid, &mut translate);
+
+    println!(
+        "vc_is_valid after function encoding: {}",
+        vc_is_valid.quant_vc.expr
+    );
+    if !options.opt_options.no_simplify {
+        vc_is_valid.simplify();
+    }
+
+    if options.debug_options.z3_trace {
+        tracing::info!("Z3 tracing output will be written to `z3.log`.");
+    }
+
+    let mut result =
+        vc_is_valid.run_solver_with_ranges(options, limits_ref, name, &ctx, &mut translate, &slice_vars,ranges_constraints)?;
 
     server
         .handle_vc_check_result(name, &mut result, &mut translate)
@@ -420,9 +461,139 @@ impl<'ctx> SmtVcProveTask<'ctx> {
         })
     }
 
+    pub fn run_solver_with_ranges<'smt>(
+        self,
+        options: &VerifyCommand,
+        limits_ref: &LimitsRef,
+        name: &SourceUnitName,
+        ctx: &'ctx Context,
+        translate: &mut TranslateExprs<'smt, 'ctx>,
+        slice_vars: &SliceStmts,
+        ranges_constraints: Vec<BoolVcProveTask>,
+    ) -> Result<SmtVcProveResult<'ctx>, CaesarError> {
+        let span = info_span!("SAT check");
+        let _entered = span.enter();
+
+        let mut prover = mk_valid_query_prover(limits_ref, ctx, translate, &self.vc);
+
+        for constraint in ranges_constraints {
+            let smt_task = SmtVcProveTask::translate(constraint, translate);
+            prover.add_assumption(&smt_task.vc);
+        }
+        if options.debug_options.z3_probe {
+            let goal = Goal::new(ctx, false, false, false);
+            for assertion in prover.get_assertions() {
+                goal.assert(&assertion);
+            }
+            eprintln!(
+                "Probe results for {}:\n{}",
+                name,
+                ProbeSummary::probe(ctx, &goal)
+            );
+        }
+
+        let smtlib = get_smtlib(options, &prover);
+        if let Some(smtlib) = &smtlib {
+            write_smtlib(&options.debug_options, name, smtlib, None)?;
+        }
+
+        if options.debug_options.no_verify {
+            return Ok(SmtVcProveResult {
+                prove_result: ProveResult::Unknown(ReasonUnknown::Other(
+                    "verification skipped".to_owned(),
+                )),
+                model: None,
+                slice_model: None,
+                quant_vc: self.quant_vc,
+            });
+        }
+
+        let mut slice_solver = SliceSolver::new(slice_vars.clone(), translate, prover);
+        let failing_slice_options = SliceSolveOptions {
+            minimality: if options.slice_options.slice_error_first {
+                SliceMinimality::Any
+            } else {
+                SliceMinimality::Size
+            },
+            unknown: if options.slice_options.slice_error_inconsistent {
+                UnknownHandling::Accept
+            } else {
+                UnknownHandling::Stop
+            },
+        };
+
+        // this is the main call to the SMT solver for the verification task!
+        let (result, models) =
+            slice_solver.slice_failing_binary_search(&failing_slice_options, limits_ref)?;
+        let (model, mut slice_model) = match models {
+            Some((model, slice_model)) => (Some(model), Some(slice_model)),
+            None => (None, None),
+        };
+
+        // if the program was successfully proven, do slicing for verification
+        if options.slice_options.slice_verify && matches!(result, ProveResult::Proof) {
+            match options.slice_options.slice_verify_via {
+                SliceVerifyMethod::UnsatCore => {
+                    slice_model = slice_solver.slice_verifying_unsat_core(limits_ref)?;
+                }
+                SliceVerifyMethod::MinimalUnsatSubset => {
+                    let slice_options = SliceSolveOptions {
+                        minimality: SliceMinimality::Subset,
+                        unknown: UnknownHandling::Continue,
+                    };
+                    slice_model =
+                        slice_solver.slice_verifying_enumerate(&slice_options, limits_ref)?;
+                }
+                SliceVerifyMethod::SmallestUnsatSubset => {
+                    let slice_options = SliceSolveOptions {
+                        minimality: SliceMinimality::Size,
+                        unknown: UnknownHandling::Continue,
+                    };
+                    slice_model =
+                        slice_solver.slice_verifying_enumerate(&slice_options, limits_ref)?;
+                }
+                SliceVerifyMethod::ExistsForall => {
+                    let slice_options = SliceSolveOptions {
+                        minimality: SliceMinimality::Any,
+                        unknown: UnknownHandling::Stop,
+                    };
+                    if translate.ctx.uninterpreteds().is_empty() {
+                        slice_model = slice_solver
+                            .slice_verifying_exists_forall(&slice_options, limits_ref)?;
+                    } else {
+                        tracing::warn!("There are uninterpreted sorts, functions, or axioms present. Slicing for correctness is disabled because it does not support them.");
+                    }
+                }
+            }
+        }
+
+        if options.debug_options.z3_stats {
+            let stats = slice_solver.get_statistics();
+            eprintln!("Z3 statistics for {name}: {stats:?}");
+        }
+
+        if let Some(smtlib) = &smtlib {
+            // only print to the directory again
+            let options = DebugOptions {
+                print_smt: false,
+                smt_dir: options.debug_options.smt_dir.clone(),
+                ..options.debug_options
+            };
+            write_smtlib(&options, name, smtlib, Some(&result))?;
+        }
+
+        Ok(SmtVcProveResult {
+            prove_result: result,
+            model,
+            slice_model,
+            quant_vc: self.quant_vc,
+        })
+    }
+
     /// Run the solver(s) on this SMT formula.
     pub fn no_slice_run_solver<'smt>(
         self,
+        options: &VerifyCommand,
         limits_ref: &LimitsRef,
         ctx: &'ctx Context,
         translate: &mut TranslateExprs<'smt, 'ctx>,
@@ -450,13 +621,30 @@ impl<'ctx> SmtVcProveTask<'ctx> {
 
         prover.add_provable(&self.vc);
 
+        if options.debug_options.z3_probe {
+            let goal = Goal::new(ctx, false, false, false);
+            for assertion in prover.get_assertions() {
+                goal.assert(&assertion);
+            }
+            eprintln!("Probe results \n{}", ProbeSummary::probe(ctx, &goal));
+        }
         // println!("prover stuff {}", prover.get_smtlib().into_string());
+        let total_start = Instant::now();
+
         //
         // Run solver & retrieve model if available
         let result = prover.check_proof();
         //    let result =  prover.check_sat();
+        let check_duration = total_start.elapsed();
+
+        // println!("check_sat took: {:.3?}", check_duration);
+
+        let model_start = Instant::now();
 
         let model = prover.get_model();
+        let model_duration = model_start.elapsed();
+        // println!("get_model took: {:.3?}", model_duration);
+        // println!("total solving time: {:.3?}", total_start.elapsed());
 
         Ok(SmtVcProveResultNoSlice {
             prove_result: result,
