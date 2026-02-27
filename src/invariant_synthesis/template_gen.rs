@@ -1,4 +1,6 @@
-use indexmap::IndexMap;
+use std::collections::HashSet;
+
+use indexmap::{IndexMap, IndexSet};
 use num::{BigInt, BigRational};
 use z3::{Config, Context, SatResult};
 use z3rro::prover::{IncrementalMode, Prover};
@@ -373,55 +375,38 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
     output_type: &TyKind,
     max_degree: usize,
 ) -> (Expr, usize, usize) {
-    let mut final_expr: Option<Expr> = None;
+
+    let mut cases: Vec<(Expr, Expr)> = Vec::new();
+    let mut num_sat_checks = 0;
     let mut num_guard_expressions = 0;
 
-    let clamp_with_zero_type =
-        if signed_output_type == TyKind::Int || signed_output_type == TyKind::UInt {
-            TyKind::UInt
-        } else {
-            TyKind::UReal
-        };
-    let mut num_sat_checks = 0;
+    // --------------------------------------------------
+    // 1. Collect all SAT guard → polynomial cases
+    // --------------------------------------------------
+
     for (i_idx, iv_prod) in collected_guards.iter().enumerate() {
         for (s_idx, split) in split_conditions.iter().enumerate() {
-            let both = builder.binary(
+
+            let guard = builder.binary(
                 BinOpKind::And,
                 Some(TyKind::Bool),
                 iv_prod.clone(),
                 split.clone(),
             );
 
-            // Check satisfiability of guard && split_condition, since this is a short formula
-            // and if it is not sat we don't have to add the lc
-            // The problem here is that those are not the same variables right?
-            // The split variables are the actual function paramters,
-            // whereas the other ones are the caller parameter
-            // I think this is where the real problem lies
-            let expr_z3 = translate.t_bool(&both);
+            // SAT check
+            let expr_z3 = translate.t_bool(&guard);
             let mut prover = Prover::new(&ctx, IncrementalMode::Native);
             prover.add_assumption(&expr_z3);
 
-            num_sat_checks = num_sat_checks + 1;
-            if prover.check_sat() == SatResult::Sat {
-                num_guard_expressions = num_guard_expressions + 1;
-                let iverson_both =
-                    builder.unary(UnOpKind::Iverson, Some(clamp_with_zero_type.clone()), both);
+            num_sat_checks += 1;
 
-                // Pass precomputed program_var_decls
+            if prover.check_sat() == SatResult::Sat {
+                num_guard_expressions += 1;
+
                 let lc_name = format!("{}_{}", i_idx, s_idx);
-                // let lc = build_rational_combination(
-                //     lc_name,
-                //     synth_name,
-                //     builder,
-                //     tcx,
-                //     declare_template_var,
-                //     program_var_decls,
-                //     signed_output_type.clone(),
-                //     output_type,
-                //     max_degree,
-                // );
-                let lc = build_polynomial_combination(
+
+                let poly = build_polynomial_combination(
                     lc_name,
                     synth_name,
                     builder,
@@ -433,27 +418,36 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
                     max_degree,
                 );
 
-                let full = builder.binary(
-                    BinOpKind::Mul,
-                    Some(clamp_with_zero_type.clone()),
-                    iverson_both,
-                    lc,
-                );
-
-                final_expr = Some(match final_expr {
-                    None => full,
-                    Some(acc) => builder.binary(
-                        BinOpKind::Add,
-                        Some(clamp_with_zero_type.clone()),
-                        acc,
-                        full,
-                    ),
-                });
+                cases.push((guard, poly));
             }
         }
     }
 
-    (final_expr.unwrap(), num_sat_checks, num_guard_expressions)
+    // --------------------------------------------------
+    // 2. Handle empty case
+    // --------------------------------------------------
+
+    if cases.is_empty() {
+        let zero = builder.zero_lit(&output_type.clone());
+        return (zero, num_sat_checks, 0);
+    }
+
+    // --------------------------------------------------
+    // 3. Build nested ITE (right-associated)
+    // --------------------------------------------------
+
+    let mut expr = cases.last().unwrap().1.clone();
+
+    for (guard, poly) in cases.iter().rev().skip(1) {
+        expr = builder.ite(
+            Some(output_type.clone()),
+            guard.clone(),
+            poly.clone(),
+            expr,
+        );
+    }
+
+    (expr, num_sat_checks, num_guard_expressions)
 }
 
 pub fn build_template_expression<'smt, 'ctx>(
@@ -533,7 +527,7 @@ pub fn build_template_expression<'smt, 'ctx>(
 
     let mut bool_exprs: Vec<Shared<ExprData>> = [].into();
     let mut var_map = [].into();
-    // Step 1: Collect Boolean conditions relevant to the inputs
+   // Step 1: Collect Boolean conditions relevant to the inputs
     if split_count >= 1 {
         (bool_exprs, var_map) =
             collect_relevant_bool_conditions(synth_val, vc_expr, mappings, tcx, limits_ref);
@@ -651,7 +645,7 @@ fn explore_boolean_assignments<'smt, 'ctx>(
     let mut num_sat_checks = 0;
 
     // Recursive case: branch on bit = false / true
-    for &bit in &[false, true] {
+    for &bit in &[true, false] {
         partial_assign.push(bit);
 
         let mut new_iverson = iverson_prod.clone();
@@ -712,13 +706,20 @@ fn _split_vc(expr: &Expr) -> (&Expr, &Expr) {
 ///   b) as the operand of an Iverson `[expr]`
 pub fn collect_bool_conditions(expr: &Expr) -> Vec<Expr> {
     let mut out = Vec::new();
-    let mut seen: Vec<*const Expr> = Vec::new(); // identity via raw pointers
+    let mut seen: HashSet<String> = HashSet::new();
+
     collect_bool_conditions_rec(expr, &mut out, &mut seen);
+
     out
 }
-fn collect_bool_conditions_rec(expr: &Expr, out: &mut Vec<Expr>, seen: &mut Vec<*const Expr>) {
+
+fn collect_bool_conditions_rec(
+    expr: &Expr,
+    out: &mut Vec<Expr>,
+    seen: &mut HashSet<String>,
+) {
     match &expr.kind {
-        // a) ITE condition
+        // ITE condition
         ExprKind::Ite(cond, then_branch, else_branch) => {
             record_if_new(cond, out, seen);
 
@@ -727,13 +728,14 @@ fn collect_bool_conditions_rec(expr: &Expr, out: &mut Vec<Expr>, seen: &mut Vec<
             collect_bool_conditions_rec(else_branch, out, seen);
         }
 
-        // b) Unary Iverson operator
-        ExprKind::Unary(un_op, operand) if matches!(un_op.node, UnOpKind::Iverson) => {
+        // Iverson operand (if still present elsewhere)
+        ExprKind::Unary(un_op, operand)
+            if matches!(un_op.node, UnOpKind::Iverson) =>
+        {
             record_if_new(operand, out, seen);
             collect_bool_conditions_rec(operand, out, seen);
         }
 
-        // all other expressions
         _ => {
             for child in expr.children() {
                 collect_bool_conditions_rec(child, out, seen);
@@ -741,10 +743,16 @@ fn collect_bool_conditions_rec(expr: &Expr, out: &mut Vec<Expr>, seen: &mut Vec<
         }
     }
 }
-fn record_if_new(expr: &Expr, out: &mut Vec<Expr>, seen: &mut Vec<*const Expr>) {
-    let ptr = expr as *const Expr;
-    if !seen.contains(&ptr) {
+
+fn record_if_new(
+    expr: &Expr,
+    out: &mut Vec<Expr>,
+    seen: &mut HashSet<String>,
+) {
+    // Use canonical string representation
+    let key = expr.to_string();
+
+    if seen.insert(key) {
         out.push(expr.clone());
-        seen.push(ptr);
     }
 }
