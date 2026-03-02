@@ -197,47 +197,58 @@ impl<'ctx> SmtEval<'ctx> for Real<'ctx> {
     type Value = BigRational;
 
     fn eval(&self, model: &InstrumentedModel<'ctx>) -> Result<Self::Value, SmtEvalError> {
-        let res = model
-            .eval_ast(self, false) // TODO
-            .ok_or(SmtEvalError::EvalError)?;
+        let res = model.eval_ast(self, true).ok_or(SmtEvalError::EvalError)?;
 
-        // The .as_real() method only returns a pair of i64 values. If the
-        // results don't fit in these types, we start some funky string parsing.
+        // Small rationals that fit into i64
         if let Some((num, den)) = res.as_real() {
-            Ok(BigRational::new(num.into(), den.into()))
+            return Ok(BigRational::new(num.into(), den.into()));
+        }
+
+        let expr_str = res.to_string();
+
+        // Step 1: Strip outer negation if present
+        // Handles: (- X)
+        let (is_neg, inner) = if expr_str.starts_with("(- ") && expr_str.ends_with(')') {
+            (true, &expr_str[3..expr_str.len() - 1])
         } else {
-            let division_expr = format!("{res:?}");
+            (false, expr_str.as_str())
+        };
 
-            // Detect outer negation
-            let (is_neg, inner) =
-                if division_expr.starts_with("(- ") && division_expr.ends_with(')') {
-                    (true, &division_expr[3..division_expr.len() - 1])
-                } else {
-                    (false, division_expr.as_str())
-                };
+        // Case 1: plain integer real like:
+        // 123456789.0
+        if let Some(int_part) = inner.strip_suffix(".0") {
+            let mut numerator = BigInt::from_str(int_part).map_err(|_| SmtEvalError::ParseError)?;
 
-            if !inner.starts_with("(/ ") || !inner.ends_with(".0)") {
-                return Err(SmtEvalError::ParseError);
+            if is_neg {
+                numerator = -numerator;
             }
 
+            return Ok(BigRational::from_integer(numerator));
+        }
+
+        // Case 2: rational division:
+        // (/ 123.0 456.0)
+        if inner.starts_with("(/ ") && inner.ends_with(')') {
             let mut parts = inner.split_ascii_whitespace();
 
-            let first_part = parts.next().ok_or(SmtEvalError::ParseError)?;
-            if first_part != "(/" {
+            if parts.next() != Some("(/") {
                 return Err(SmtEvalError::ParseError);
             }
 
-            let second_part = parts.next().ok_or(SmtEvalError::ParseError)?;
-            let numerator_str = second_part
-                .strip_suffix(".0")
+            let numerator_str = parts
+                .next()
+                .and_then(|s| s.strip_suffix(".0"))
                 .ok_or(SmtEvalError::ParseError)?;
+
             let mut numerator =
                 BigInt::from_str(numerator_str).map_err(|_| SmtEvalError::ParseError)?;
 
-            let third_part = parts.next().ok_or(SmtEvalError::ParseError)?;
-            let denominator_str = third_part
+            let denominator_token = parts.next().ok_or(SmtEvalError::ParseError)?;
+            let denominator_str = denominator_token
                 .strip_suffix(".0)")
+                .or_else(|| denominator_token.strip_suffix(".0"))
                 .ok_or(SmtEvalError::ParseError)?;
+
             let denominator =
                 BigInt::from_str(denominator_str).map_err(|_| SmtEvalError::ParseError)?;
 
@@ -245,7 +256,9 @@ impl<'ctx> SmtEval<'ctx> for Real<'ctx> {
                 numerator = -numerator;
             }
 
-            Ok(BigRational::new(numerator, denominator))
+            return Ok(BigRational::new(numerator, denominator));
         }
+
+        Err(SmtEvalError::ParseError)
     }
 }

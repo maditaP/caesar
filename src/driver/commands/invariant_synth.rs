@@ -105,8 +105,11 @@ fn synth_inv_main(
     let mut num_failures: usize = 0;
     let mut num_cex = 0;
     const MAX_CEGIS_ITERS: usize = 3000;
-    let max_split_count: usize =
-        split_count + options.synth_options.max_template_refinements.unwrap_or(30);
+    let max_split_count: usize = split_count
+        + options
+            .synth_options
+            .max_template_refinements
+            .unwrap_or(300);
     let mut template_satchecks = 0;
     let mut duration_template_building = Duration::new(0, 0);
 
@@ -249,6 +252,9 @@ fn synth_inv_main(
                 for (synth_name, synth_val) in synth.iter() {
                     let start_template = Instant::now();
 
+                    let mut vc_unfolded = vc_expr.expr.clone();
+                    let mut unfolder = Unfolder::new(limits_ref.clone(), &smt_ctx);
+                    unfolder.visit_expr(&mut vc_unfolded)?;
                     // Build template for this particular synthesized function
                     let (temp_template, vars, temp_num_guards, temp_num_sat_checks) =
                         build_template_expression(
@@ -262,6 +268,7 @@ fn synth_inv_main(
                             &mut translate,
                             &ctx,
                             limits_ref.clone(),
+                            &vc_unfolded
                         );
                     template_satchecks = template_satchecks + temp_num_sat_checks;
 
@@ -297,7 +304,6 @@ fn synth_inv_main(
                     //     NeutralsRemover::new(limits_ref.clone(), &smt_ctx_local);
                     // neutrals_remover.visit_expr(&mut tpl)?;
 
-                    // println!("template for `{}`: {:?}", synth_name, tpl);
                     if options.synth_options.print_template {
                         println!("template for `{}`: {}", synth_name, remove_casts(&tpl));
                     }
@@ -321,6 +327,7 @@ fn synth_inv_main(
                 vc_is_valid =
                     lower_quant_prove_task(options, &limits_ref, &tcx, name, vc_expr.clone())?;
             }
+
 
             let template_idents: IndexSet<Ident> =
                 all_template_vars.iter().map(|(id, _)| id.clone()).collect();
@@ -348,6 +355,8 @@ fn synth_inv_main(
             let mut collector = FreeVariableCollector::new();
 
             let vc_vars = collector.collect_and_clear(&mut boolean_vc.vc);
+            let all_program_variables: IndexSet<Ident> =
+                vc_vars.difference(&template_idents).cloned().collect();
 
             let mut cex_mapping: IndexMap<Ident, Expr> = [].into();
 
@@ -363,13 +372,12 @@ fn synth_inv_main(
                     println!("=== CEGIS loop {iteration} ===");
                 }
 
-                //  for (ident, expr) in &tvar_mapping {
+                // for (ident, expr) in &tvar_mapping {
                 //     if template_idents.contains(ident) {
                 //         println!("{} -> {expr}", ident.name);
                 //         // print!(" {expr} ");
                 //     }
                 // }
-                // println!("");
                 let zero_extended_mapping: IndexMap<Ident, Expr>;
                 // Map all template variables to the value to try out.
                 // Template variables with no mapping will be mapped to zero
@@ -398,9 +406,7 @@ fn synth_inv_main(
                 }
                 let stringified_map = canonical_form(&zero_extended_mapping);
                 if !all_zems.insert(stringified_map.clone()) {
-                    return Err(CaesarError::UserError(
-                        "Tvar mapping appeared twice".into(),
-                    ));
+                    return Err(CaesarError::UserError("Tvar mapping appeared twice".into()));
                 }
                 // for (ident, expr) in &zero_extended_mapping {
                 //     if template_idents.contains(ident) {
@@ -409,6 +415,7 @@ fn synth_inv_main(
                 //     }
                 // }
                 // println!("");
+                
                 let bvc_tvars_inst = subst_from_mapping(
                     zero_extended_mapping.clone(),
                     &boolean_vc.vc,
@@ -482,11 +489,13 @@ fn synth_inv_main(
                     vc: bvc_tvars_inst_with_distance,
                 };
 
-                // println!("checking for validity: {}", bvc_tvars_inst_btask.vc);
+                // println!("checking for validity: {:?}", bvc_tvars_inst_btask.vc);
                 // Translate to SMT form
+                
                 bvc_tvars_inst_smttask =
                     SmtVcProveTask::translate(bvc_tvars_inst_btask, &mut translate);
 
+                
                 let bvc_tvars_inst_smttask_with_distance =
                     SmtVcProveTask::translate(bvc_tvars_inst_btask_with_distance, &mut translate);
 
@@ -647,7 +656,8 @@ fn synth_inv_main(
                 // Here we add the original vc_tvars_pvars instantiated with the model for the program variables
                 // to the constraint we use to find valuations for the template variables.
                 if let Some(model) = result_verifier.model {
-                    cex_mapping = create_subst_mapping(vc_vars.clone(), &model, &mut translate);
+                    cex_mapping =
+                        create_subst_mapping(all_program_variables.clone(), &model, &mut translate);
 
                     if options.synth_options.print_cegis_info {
                         println!("Found counterexample: ");
@@ -718,7 +728,6 @@ fn synth_inv_main(
                         vc: bvc_pvars_inst.clone(),
                     };
 
-                    
                     // --- Phase 3: Evaluate template variables in original vc ---
                     if let Some(mapping) = get_model_for_constraints(
                         &mut prover,

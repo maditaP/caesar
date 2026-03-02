@@ -5,7 +5,10 @@ use num::{BigInt, BigRational};
 
 use z3::{Context, Goal};
 use z3rro::{
-    eureal::ConcreteEUReal, model::{InstrumentedModel, SmtEval}, probes::ProbeSummary, prover::{IncrementalMode, Prover}
+    eureal::ConcreteEUReal,
+    model::{InstrumentedModel, SmtEval, SmtEvalError},
+    probes::ProbeSummary,
+    prover::{IncrementalMode, Prover},
 };
 
 use crate::{
@@ -136,8 +139,6 @@ impl<'smt, 'ctx> VisitorMut for FunctionInliner<'smt, 'ctx> {
         }
     }
 }
-
-// Translates a model into a map Ident -> Expression
 pub fn create_subst_mapping<'ctx>(
     idents: IndexSet<Ident>,
     model: &InstrumentedModel<'ctx>,
@@ -145,58 +146,74 @@ pub fn create_subst_mapping<'ctx>(
 ) -> IndexMap<ast::symbol::Ident, Expr> {
     let builder = ExprBuilder::new(Span::dummy_span());
     let mut mapping = IndexMap::new();
-    // let idents: Vec<_> = translate.local_idents().collect();
 
     for ident in idents {
-        // Build a variable expression to feed into t_symbolic
         let var_expr = builder.var(ident.clone(), translate.ctx.tcx());
         let symbolic = translate.t_symbolic(&var_expr);
+
         let lit_opt = match &symbolic {
-            Symbolic::Bool(v) => v.eval(model).ok().map(|b| builder.bool_lit(b)),
+            Symbolic::Bool(v) => {
+                let b = v.eval(model)
+                    .unwrap_or_else(|e| panic!("SMT eval failed for {ident:?}: {e}"));
+                Some(builder.bool_lit(b))
+            }
 
-            Symbolic::Int(v) => v
-                .eval(model)
-                .ok()
-                .map(|i: BigInt| builder.frac_lit(BigRational::from_integer(i))),
+            Symbolic::Int(v) => {
+                let i: BigInt = v.eval(model)
+                    .unwrap_or_else(|e| panic!("SMT eval failed for {ident:?}: {e}"));
+                Some(builder.frac_lit(BigRational::from_integer(i)))
+            }
 
-            Symbolic::UInt(v) => v.eval(model).ok().map(|i: BigInt| {
-                if i >= BigInt::from(0) {
+            Symbolic::UInt(v) => {
+                let i: BigInt = v.eval(model)
+                    .unwrap_or_else(|e| panic!("SMT eval failed for {ident:?}: {e}"));
+
+                let lit = if i >= BigInt::from(0) {
                     match u128::try_from(i.clone()) {
                         Ok(u) => builder.uint(u),
                         Err(_) => builder.frac_lit(BigRational::from_integer(i)),
                     }
                 } else {
                     builder.frac_lit(BigRational::from_integer(i))
-                }
-            }),
+                };
+
+                Some(lit)
+            }
 
             Symbolic::Real(v) => {
-                let eval = v.eval(model);
-                eval.ok().map(|r: BigRational| builder.signed_frac_lit(r))
+                let r: BigRational = v.eval(model)
+                    .unwrap_or_else(|e| panic!("SMT eval failed for {ident:?}: {e}"));
+                Some(builder.signed_frac_lit(r))
             }
 
             Symbolic::UReal(v) => {
-                let eval = v.eval(model);
-                eval.ok()
-                    .map(|r: BigRational| builder.frac_lit_not_extended(r))
+                let r: BigRational = v.eval(model)
+                    .unwrap_or_else(|e| panic!("SMT eval failed for {ident:?}: {e}"));
+                Some(builder.frac_lit_not_extended(r))
             }
 
-            Symbolic::EUReal(v) => v.eval(model).ok().map(|r| match r {
-                ConcreteEUReal::Real(rat) => builder.frac_lit(rat),
-                ConcreteEUReal::Infinity => builder.infinity_lit(),
-            }),
+            Symbolic::EUReal(v) => {
+                let r = v.eval(model)
+                    .unwrap_or_else(|e| panic!("SMT eval failed for {ident:?}: {e}"));
+
+                let lit = match r {
+                    ConcreteEUReal::Real(rat) => builder.frac_lit(rat),
+                    ConcreteEUReal::Infinity => builder.infinity_lit(),
+                };
+
+                Some(lit)
+            }
 
             _ => None,
         };
 
-        if let Some(ref lit) = lit_opt {
-            mapping.insert(ident.clone(), lit.clone());
+        if let Some(lit) = lit_opt {
+            mapping.insert(ident.clone(), lit);
         }
     }
 
     mapping
 }
-
 /// "Instantiate" an expression with concrete values from a mapping.
 /// To do this, wrap the expression in nested `Subst` expressions.
 /// Then later tunfolding can take care of the actual substitutions.
@@ -239,21 +256,20 @@ pub fn get_model_for_constraints<'smt, 'ctx, 'tcx: 'ctx>(
 
     prover.add_assumption(&constraints_prove_task.vc);
 
-    // println!("Current solver state for constraints:");
-    // println!("{}", prover.get_smtlib().into_string());
+    if options.debug_options.print_smt {
+        println!("Current solver state for constraints:");
+        println!("{}", prover.get_smtlib().into_string());
+    }
 
     let total_start = Instant::now();
 
-     if options.debug_options.z3_probe {
-            let goal = Goal::new(ctx, false, false, false);
-            for assertion in prover.get_assertions() {
-                goal.assert(&assertion);
-            }
-            eprintln!(
-                "Probe results: {}",
-                ProbeSummary::probe(ctx, &goal)
-            );
+    if options.debug_options.z3_probe {
+        let goal = Goal::new(ctx, false, false, false);
+        for assertion in prover.get_assertions() {
+            goal.assert(&assertion);
         }
+        eprintln!("Constraint Probe results: {}", ProbeSummary::probe(ctx, &goal));
+    }
     let res = prover.check_sat();
 
     // println!("check_sat result: {:?}", res);

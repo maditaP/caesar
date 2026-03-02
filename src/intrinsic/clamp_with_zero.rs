@@ -70,7 +70,7 @@ impl FuncIntrin for ClampWithZeroIntrin {
                 let zero = Int::from_i64(&ctx, 0);
 
                 let cond = x.gt(&zero);
-                // let value = UReal::from_uint(&UInt::unchecked_from_int(cond.ite(&x, &zero)));
+                let value = UReal::from_uint(&UInt::unchecked_from_int(cond.ite(&x, &zero)));
 
                 // Symbolic::UInt(UInt::unchecked_from_int(cond.ite(&x, &zero)))
                 Symbolic::UInt(UInt::unchecked_from_int(x))
@@ -84,7 +84,7 @@ impl FuncIntrin for ClampWithZeroIntrin {
                 let zero = Int::from_i64(&ctx, 0);
 
                 let cond = x.gt(&zero);
-                // let value = UReal::from_uint(&UInt::unchecked_from_int(cond.ite(&x, &zero)));
+                let value = UReal::from_uint(&UInt::unchecked_from_int(cond.ite(&x, &zero)));
 
                 Symbolic::UInt(UInt::unchecked_from_int(x.clone()))
                 // Symbolic::UInt(UInt::unchecked_from_int(cond.ite(&x, &zero)))

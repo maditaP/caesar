@@ -1,6 +1,4 @@
-use std::collections::HashSet;
-
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use num::{BigInt, BigRational};
 use z3::{Config, Context, SatResult};
 use z3rro::prover::{IncrementalMode, Prover};
@@ -200,7 +198,7 @@ pub fn collect_relevant_bool_conditions(
     mappings: Vec<VarToParamMap>,
     tcx: &TyCtx,
     limits_ref: LimitsRef,
-) -> (Vec<Expr>, IndexMap<Ident, Ident>) {
+) -> (Vec<Expr>, IndexMap<Ident, Ident>, IndexMap<Ident, Expr>) {
     let mut out = Vec::new();
 
     let ctx = Context::new(&Config::default());
@@ -214,6 +212,7 @@ pub fn collect_relevant_bool_conditions(
     // param → program var
     let mut param_var_mapping: IndexMap<Ident, Ident> = IndexMap::new();
 
+    let mut other_mapping: IndexMap<Ident, Expr> = IndexMap::new();
     'bools: for b in collect_bool_conditions(vc_expr) {
         let vars = collect_program_vars(&b);
 
@@ -235,6 +234,7 @@ pub fn collect_relevant_bool_conditions(
                             .entry(param_id.clone())
                             .or_insert_with(|| prog_var.clone());
                     }
+                    other_mapping.insert(prog_var.clone(), param_expr.clone());
                 }
 
                 continue 'bools;
@@ -242,7 +242,7 @@ pub fn collect_relevant_bool_conditions(
         }
     }
 
-    (out, param_var_mapping)
+    (out, param_var_mapping, other_mapping)
 }
 
 fn collect_program_vars(expr: &Expr) -> indexmap::IndexSet<Ident> {
@@ -360,7 +360,6 @@ fn cartesian_and(lists: &[Vec<Expr>], builder: &ExprBuilder) -> Vec<Expr> {
     acc
 }
 
-// Creates the expression (collected_guards x split_conditions) * lc
 pub fn assemble_piecewise_expression<'smt, 'ctx>(
     synth_name: &Ident,
     collected_guards: &[Expr],
@@ -375,27 +374,27 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
     output_type: &TyKind,
     max_degree: usize,
 ) -> (Expr, usize, usize) {
-
-    let mut cases: Vec<(Expr, Expr)> = Vec::new();
-    let mut num_sat_checks = 0;
+    let mut final_expr: Option<Expr> = None;
     let mut num_guard_expressions = 0;
+    let mut num_sat_checks = 0;
 
-    // --------------------------------------------------
-    // 1. Collect all SAT guard → polynomial cases
-    // --------------------------------------------------
+    let clamp_with_zero_type =
+        if signed_output_type == TyKind::Int || signed_output_type == TyKind::UInt {
+            TyKind::UInt
+        } else {
+            TyKind::EUReal
+        };
 
     for (i_idx, iv_prod) in collected_guards.iter().enumerate() {
         for (s_idx, split) in split_conditions.iter().enumerate() {
-
-            let guard = builder.binary(
+            let both = builder.binary(
                 BinOpKind::And,
                 Some(TyKind::Bool),
                 iv_prod.clone(),
                 split.clone(),
             );
 
-            // SAT check
-            let expr_z3 = translate.t_bool(&guard);
+            let expr_z3 = translate.t_bool(&both);
             let mut prover = Prover::new(&ctx, IncrementalMode::Native);
             prover.add_assumption(&expr_z3);
 
@@ -404,9 +403,12 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
             if prover.check_sat() == SatResult::Sat {
                 num_guard_expressions += 1;
 
+                let iverson_both =
+                    builder.unary(UnOpKind::Iverson, Some(clamp_with_zero_type.clone()), both);
+
                 let lc_name = format!("{}_{}", i_idx, s_idx);
 
-                let poly = build_polynomial_combination(
+                let lc = build_polynomial_combination(
                     lc_name,
                     synth_name,
                     builder,
@@ -418,36 +420,64 @@ pub fn assemble_piecewise_expression<'smt, 'ctx>(
                     max_degree,
                 );
 
-                cases.push((guard, poly));
+                let full = builder.binary(
+                    BinOpKind::Mul,
+                    Some(clamp_with_zero_type.clone()),
+                    iverson_both,
+                    lc,
+                );
+
+                final_expr = Some(match final_expr {
+                    None => full,
+                    Some(acc) => builder.binary(
+                        BinOpKind::Add,
+                        Some(clamp_with_zero_type.clone()),
+                        acc,
+                        full,
+                    ),
+                });
             }
         }
     }
 
-    // --------------------------------------------------
-    // 2. Handle empty case
-    // --------------------------------------------------
+    (final_expr.unwrap(), num_sat_checks, num_guard_expressions)
+}
+fn extract_loop_guard_and_post(expr: &Expr, synth_name: &Ident) -> Option<(Expr, Expr)> {
+    // Check for a top-level (Co)Compare
+    if let ExprKind::Binary(bin_op, lhs, rhs) = &expr.kind {
+        if matches!(bin_op.node, BinOpKind::CoCompare | BinOpKind::Compare) {
+            // Scan lhs recursively for Call(synth_name)
+            fn lhs_has_call(expr: &Expr, synth_name: &Ident) -> bool {
+                match &expr.kind {
+                    ExprKind::Call(func_ident, _) if func_ident.name == synth_name.name => true,
+                    _ => expr
+                        .children()
+                        .iter()
+                        .any(|child| lhs_has_call(child, synth_name)),
+                }
+            }
 
-    if cases.is_empty() {
-        let zero = builder.zero_lit(&output_type.clone());
-        return (zero, num_sat_checks, 0);
+            if lhs_has_call(lhs, synth_name) {
+                // Expect rhs to be ITE(loop_guard, body, post_exp)
+                if let ExprKind::Ite(cond, _then_branch, else_branch) = &rhs.kind {
+                    return Some((cond.clone(), else_branch.clone()));
+                }
+            }
+
+            // Recurse left and right
+            return extract_loop_guard_and_post(lhs, synth_name)
+                .or_else(|| extract_loop_guard_and_post(rhs, synth_name));
+        }
     }
 
-    // --------------------------------------------------
-    // 3. Build nested ITE (right-associated)
-    // --------------------------------------------------
-
-    let mut expr = cases.last().unwrap().1.clone();
-
-    for (guard, poly) in cases.iter().rev().skip(1) {
-        expr = builder.ite(
-            Some(output_type.clone()),
-            guard.clone(),
-            poly.clone(),
-            expr,
-        );
+    // Recurse into children for all other expressions
+    for child in expr.children() {
+        if let Some(res) = extract_loop_guard_and_post(child, synth_name) {
+            return Some(res);
+        }
     }
 
-    (expr, num_sat_checks, num_guard_expressions)
+    None
 }
 
 pub fn build_template_expression<'smt, 'ctx>(
@@ -461,11 +491,15 @@ pub fn build_template_expression<'smt, 'ctx>(
     translate: &mut TranslateExprs<'smt, 'ctx>,
     ctx: &'ctx z3::Context,
     limits_ref: LimitsRef,
+    vc_expr_unfolded: &Expr,
 ) -> (Expr, Vec<(Ident, TyKind)>, usize, usize) {
     let mut output_type = TyKind::EUReal;
-    if let Some(DeclKind::FuncDecl(func_ref)) = tcx.get(*synth_name).as_deref() {
-        output_type = func_ref.borrow().output.clone();
-    }
+    // if let Some(DeclKind::FuncDecl(func_ref)) = tcx.get(*synth_name).as_deref() {
+    //     output_type = func_ref.borrow().output.clone();
+    // }
+
+    let (mut loop_guard, mut post_exp) = extract_loop_guard_and_post(vc_expr_unfolded, synth_name)
+        .expect("Could not find loop guard and post expression in unfolded VC");
 
     let mut signed_output_type = output_type.clone();
 
@@ -527,15 +561,85 @@ pub fn build_template_expression<'smt, 'ctx>(
 
     let mut bool_exprs: Vec<Shared<ExprData>> = [].into();
     let mut var_map = [].into();
-   // Step 1: Collect Boolean conditions relevant to the inputs
+    let mut other_map = [].into();
+    // Step 1: Collect Boolean conditions relevant to the inputs
     if split_count >= 1 {
-        (bool_exprs, var_map) =
-            collect_relevant_bool_conditions(synth_val, vc_expr, mappings, tcx, limits_ref);
+        (bool_exprs, var_map, other_map) = collect_relevant_bool_conditions(
+            synth_val,
+            vc_expr_unfolded,
+            mappings,
+            tcx,
+            limits_ref.clone(),
+        );
+    }
+    fn unwrap_postexp(expr: &Expr) -> Expr {
+        match &expr.kind {
+            // Iverson: [expr]
+            ExprKind::Unary(_, inner) => unwrap_postexp(inner),
+            // Sup/⊔: maybe represented as Binary(Or, left, right) or custom kind
+            ExprKind::Binary(bin_op, left, right) if matches!(bin_op.node, BinOpKind::Sup) => {
+                unwrap_postexp(left)
+            }
+            // Other wrappers you may have: add cases here
+            _ => expr.clone(),
+        }
     }
 
-    if bool_exprs.is_empty() {
-        bool_exprs.push(builder.bool_lit(true));
-    }
+    // Then filter:
+    let binding = post_exp.clone();
+    let mut post_exp_inner = unwrap_postexp(&binding);
+
+    // let ctx = Context::new(&Config::default());
+
+    let smt_ctx_local = SmtCtx::new(
+        &ctx,
+        &tcx,
+        Box::new(AxiomaticFunctionEncoder::default()),
+        DepConfig::SpecsOnly,
+    );
+
+    loop_guard = subst_from_mapping(
+        other_map.clone(),
+        &loop_guard.clone(),
+        &limits_ref.clone(),
+        &smt_ctx_local,
+    )
+    .unwrap();
+
+    println!("loopguard: {loop_guard}");
+    post_exp_inner = subst_from_mapping(
+        other_map.clone(),
+        &post_exp_inner.clone(),
+        &limits_ref.clone(),
+        &smt_ctx_local,
+    )
+    .unwrap();
+
+    post_exp = subst_from_mapping(
+        other_map.clone(),
+        &post_exp.clone(),
+        &limits_ref.clone(),
+        &smt_ctx_local,
+    )
+    .unwrap();
+    let mut bool_exprs: Vec<Expr> = bool_exprs
+        .iter()
+        .filter_map(|e| {
+            println!("eee ");
+            let e_inner = unwrap_postexp(e);
+            if e.to_string() != loop_guard.to_string()
+                && e_inner.to_string() != post_exp_inner.to_string()
+            {
+                Some(e.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // if bool_exprs.is_empty() {
+    //     bool_exprs.push(builder.bool_lit(true));
+    // }
 
     // Step 2: Build all split predicates
     let ranged_vars: Vec<(Expr, Range)> = program_var_decls
@@ -567,6 +671,7 @@ pub fn build_template_expression<'smt, 'ctx>(
     // }
 
     // Step 4: Combine original guards × split conditions and multiply each with own lin.exp
+
     let (mut final_expr, temp_sat_checks, num_guard_expr) = assemble_piecewise_expression(
         synth_name,
         &valid_iversons,
@@ -580,6 +685,14 @@ pub fn build_template_expression<'smt, 'ctx>(
         signed_output_type.clone(),
         &output_type,
         options.synth_options.max_degree.unwrap_or(1),
+    );
+    // Build outer: ite(loop_guard, body_expr, post_exp)
+
+    final_expr = builder.ite(
+        Some(output_type),
+        loop_guard.clone(),
+        final_expr,
+        post_exp.clone(),
     );
     num_sat_checks = num_sat_checks + temp_sat_checks;
 
@@ -645,7 +758,7 @@ fn explore_boolean_assignments<'smt, 'ctx>(
     let mut num_sat_checks = 0;
 
     // Recursive case: branch on bit = false / true
-    for &bit in &[true, false] {
+    for &bit in &[false, true] {
         partial_assign.push(bit);
 
         let mut new_iverson = iverson_prod.clone();
@@ -706,20 +819,13 @@ fn _split_vc(expr: &Expr) -> (&Expr, &Expr) {
 ///   b) as the operand of an Iverson `[expr]`
 pub fn collect_bool_conditions(expr: &Expr) -> Vec<Expr> {
     let mut out = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-
+    let mut seen: Vec<*const Expr> = Vec::new(); // identity via raw pointers
     collect_bool_conditions_rec(expr, &mut out, &mut seen);
-
     out
 }
-
-fn collect_bool_conditions_rec(
-    expr: &Expr,
-    out: &mut Vec<Expr>,
-    seen: &mut HashSet<String>,
-) {
+fn collect_bool_conditions_rec(expr: &Expr, out: &mut Vec<Expr>, seen: &mut Vec<*const Expr>) {
     match &expr.kind {
-        // ITE condition
+        // a) ITE condition
         ExprKind::Ite(cond, then_branch, else_branch) => {
             record_if_new(cond, out, seen);
 
@@ -728,14 +834,13 @@ fn collect_bool_conditions_rec(
             collect_bool_conditions_rec(else_branch, out, seen);
         }
 
-        // Iverson operand (if still present elsewhere)
-        ExprKind::Unary(un_op, operand)
-            if matches!(un_op.node, UnOpKind::Iverson) =>
-        {
+        // b) Unary Iverson operator
+        ExprKind::Unary(un_op, operand) if matches!(un_op.node, UnOpKind::Iverson) => {
             record_if_new(operand, out, seen);
             collect_bool_conditions_rec(operand, out, seen);
         }
 
+        // all other expressions
         _ => {
             for child in expr.children() {
                 collect_bool_conditions_rec(child, out, seen);
@@ -743,16 +848,10 @@ fn collect_bool_conditions_rec(
         }
     }
 }
-
-fn record_if_new(
-    expr: &Expr,
-    out: &mut Vec<Expr>,
-    seen: &mut HashSet<String>,
-) {
-    // Use canonical string representation
-    let key = expr.to_string();
-
-    if seen.insert(key) {
+fn record_if_new(expr: &Expr, out: &mut Vec<Expr>, seen: &mut Vec<*const Expr>) {
+    let ptr = expr as *const Expr;
+    if !seen.contains(&ptr) {
         out.push(expr.clone());
+        seen.push(ptr);
     }
 }

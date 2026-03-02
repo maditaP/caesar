@@ -533,7 +533,7 @@ impl<'smt, 'ctx> TranslateExprs<'smt, 'ctx> {
                 .clone()
                 .into_eureal()
                 .unwrap(),
-            ExprKind::Call(name, args) => self.t_call(*name, args).into_eureal().unwrap(),
+            ExprKind::Call(name, args) => {println!("name {name}");self.t_call(*name, args).into_eureal().unwrap()},
             ExprKind::Ite(cond, lhs, rhs) => {
                 let cond = self.t_bool(cond);
                 let lhs = self.t_eureal(lhs);

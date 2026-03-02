@@ -104,6 +104,7 @@ impl<'ctx> Symbolic<'ctx> {
     }
 
     pub fn into_eureal(self) -> Option<EUReal<'ctx>> {
+        println!("self {self:?}");
         match self {
             Symbolic::EUReal(v) => Some(v),
             _ => None,
