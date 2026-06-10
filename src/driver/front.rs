@@ -30,7 +30,7 @@ use crate::{
         resolve::Resolve,
         tycheck::Tycheck,
     },
-    intrinsic::{annotations::init_calculi, distributions::init_distributions, list::init_lists},
+    intrinsic::{annotations::init_calculi, distributions::init_distributions, list::init_lists, nonneg_cast::init_nonneg_cast},
     mc,
     pretty::{Doc, SimplePretty},
     procs::monotonicity::MonotonicityVisitor,
@@ -287,6 +287,7 @@ pub fn init_tcx(files: &mut Files) -> TyCtx {
     init_encodings(files, &mut tcx);
     init_distributions(files, &mut tcx);
     init_lists(files, &mut tcx);
+    init_nonneg_cast(files, &mut tcx);
     init_slicing(&mut tcx);
     tcx
 }
