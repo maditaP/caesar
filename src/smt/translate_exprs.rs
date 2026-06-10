@@ -10,8 +10,8 @@ use z3::{
 
 use crate::{
     ast::{
-        util::FreeVariableCollector, BinOpKind, DeclKind, Expr, ExprKind, Ident, LitKind,
-        QuantOpKind, QuantVar, Shared, Trigger, TyKind, UnOpKind,
+        util::FreeVariableCollector, BinOpKind, DeclKind, Expr, ExprBuilder, ExprKind, Ident,
+        LitKind, QuantOpKind, QuantVar, Shared, Span, Trigger, TyKind, UnOpKind,
     },
     scope_map::ScopeMap,
     smt::funcs::fuel::literals::LiteralExprSet,
@@ -310,6 +310,14 @@ impl<'smt, 'ctx> TranslateExprs<'smt, 'ctx> {
             },
             ExprKind::Unary(un_op, operand) => match un_op.node {
                 UnOpKind::Parens => self.t_int(operand),
+                UnOpKind::Iverson => {
+                    let builder = ExprBuilder::new(Span::dummy_span());
+
+                    let cond = self.t_bool(operand);
+                    let lhs = self.t_int(&builder.one_lit(&TyKind::Int));
+                    let rhs = self.t_int(&builder.zero_lit(&TyKind::Int));
+                    Int::branch(&cond, &lhs, &rhs)
+                }
                 _ => panic!("illegal exprkind {:?} of expression {:?}", un_op, &expr),
             },
             ExprKind::Cast(operand) => {
@@ -371,6 +379,14 @@ impl<'smt, 'ctx> TranslateExprs<'smt, 'ctx> {
             },
             ExprKind::Unary(un_op, operand) => match un_op.node {
                 UnOpKind::Parens => self.t_uint(operand),
+                UnOpKind::Iverson => {
+                    let builder = ExprBuilder::new(Span::dummy_span());
+
+                    let cond = self.t_bool(operand);
+                    let lhs = self.t_uint(&builder.one_lit(&TyKind::UInt));
+                    let rhs = self.t_uint(&builder.zero_lit(&TyKind::UInt));
+                    UInt::branch(&cond, &lhs, &rhs)
+                }
                 _ => panic!("illegal exprkind"),
             },
             ExprKind::Cast(operand) => {
@@ -426,6 +442,13 @@ impl<'smt, 'ctx> TranslateExprs<'smt, 'ctx> {
             },
             ExprKind::Unary(un_op, operand) => match un_op.node {
                 UnOpKind::Parens => self.t_real(operand),
+                UnOpKind::Iverson => {
+                    let operand = self.t_bool(operand);
+                    EUReal::iverson(self.ctx.eureal(), &operand)
+                        .get_ureal()
+                        .as_real()
+                        .clone()
+                }
                 _ => panic!("illegal exprkind {:?} of expression {:?}", un_op, &expr),
             },
             ExprKind::Cast(operand) => {
@@ -500,6 +523,12 @@ impl<'smt, 'ctx> TranslateExprs<'smt, 'ctx> {
             },
             ExprKind::Unary(un_op, operand) => match un_op.node {
                 UnOpKind::Parens => self.t_ureal(operand),
+                UnOpKind::Iverson => {
+                    let operand = self.t_bool(operand);
+                    EUReal::iverson(self.ctx.eureal(), &operand)
+                        .get_ureal()
+                        .clone()
+                }
                 _ => panic!("illegal exprkind {:?} of expression {:?}", un_op, &expr),
             },
             ExprKind::Cast(operand) => {
