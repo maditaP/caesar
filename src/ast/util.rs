@@ -154,7 +154,7 @@ impl VisitorMut for RemoveCastsVisitor {
     type Err = ();
 
     fn visit_expr(&mut self, e: &mut Expr) -> Result<(), Self::Err> {
-        if let ExprKind::Cast(inner) = &mut e.kind {
+        while let ExprKind::Cast(inner) = &mut e.kind {
             *e = inner.clone();
         }
         walk_expr(self, e)
