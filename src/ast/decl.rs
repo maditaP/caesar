@@ -246,7 +246,7 @@ impl VarDecl {
             init: None,
             span: param.span,
             created_from: None,
-            range: param.range.clone(),
+            range: param.range,
         };
         DeclRef::new(var_decl)
     }

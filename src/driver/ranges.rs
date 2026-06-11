@@ -11,7 +11,7 @@ pub fn create_range_constraint(ident: Ident, range: &Range, ty: TyKind) -> Expr 
 
     let (var, lower_lit, upper_lit) = match ty {
         TyKind::UReal => {
-            let var = builder.var_ty(ident.clone(), TyKind::UReal);
+            let var = builder.var_ty(ident, TyKind::UReal);
             let lower =
                 builder.frac_lit_not_extended(BigRational::from_integer(range.lower.into()));
             let upper =
@@ -19,7 +19,7 @@ pub fn create_range_constraint(ident: Ident, range: &Range, ty: TyKind) -> Expr 
             (var, lower, upper)
         }
         _ => {
-            let var = builder.var_ty(ident.clone(), TyKind::UInt);
+            let var = builder.var_ty(ident, TyKind::UInt);
             let lower = builder.uint(range.lower.into());
             let upper = builder.uint(range.upper.into());
             (var, lower, upper)
@@ -43,7 +43,7 @@ pub fn collect_ranges_from_decls(
         if let DeclKind::VarDecl(var_ref) = decl.as_ref() {
             let var = var_ref.borrow();
             if let Some(range) = &var.range {
-                ranges.insert(*ident, (range.clone(), var.ty.clone()));
+                ranges.insert(*ident, (*range, var.ty.clone()));
             }
         }
     }
