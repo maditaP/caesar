@@ -8,7 +8,7 @@ use z3::{
 };
 use z3rro::prover::Prover;
 
-use crate::ast::Ident;
+use crate::ast::{Ident, Param, Spanned};
 
 use super::symbols::Symbolizer;
 
@@ -18,8 +18,15 @@ pub struct Uninterpreteds<'ctx> {
     ctx: &'ctx Context,
     symbolizer: Symbolizer,
     sorts: HashMap<Ident, Sort<'ctx>>,
-    functions: HashMap<Ident, FuncDecl<'ctx>>,
+    pub functions: HashMap<Ident, FuncEntry<'ctx>>,
     axioms: Vec<(Ident, Bool<'ctx>)>,
+}
+
+#[derive(Debug)]
+pub struct FuncEntry<'ctx> {
+    pub(crate) decl: FuncDecl<'ctx>,
+    pub(crate) syn: bool,
+    pub inputs: Spanned<Vec<Param>>,
 }
 
 impl<'ctx> Uninterpreteds<'ctx> {
@@ -32,6 +39,9 @@ impl<'ctx> Uninterpreteds<'ctx> {
             axioms: Default::default(),
         }
     }
+    pub fn functions(&self) -> &HashMap<Ident, FuncEntry<'ctx>> {
+        &self.functions
+    }
 
     pub fn add_sort(&mut self, ident: Ident) {
         let symbol = self.symbolizer.get(ident);
@@ -40,10 +50,24 @@ impl<'ctx> Uninterpreteds<'ctx> {
         assert!(prev.is_none());
     }
 
-    pub fn add_function(&mut self, ident: Ident, domain: &[&Sort<'ctx>], range: &Sort<'ctx>) {
+    pub fn add_function(
+        &mut self,
+        ident: Ident,
+        domain: &[&Sort<'ctx>],
+        range: &Sort<'ctx>,
+        syn: bool,
+        inputs: Spanned<Vec<Param>>,
+    ) {
         let symbol = self.symbolizer.get(ident);
         let decl = FuncDecl::new(self.ctx, symbol, domain, range);
-        let prev = self.functions.insert(ident, decl);
+        let prev = self.functions.insert(
+            ident,
+            FuncEntry {
+                decl,
+                syn,
+                inputs,
+            },
+        );
         assert!(prev.is_none());
     }
 
@@ -56,7 +80,7 @@ impl<'ctx> Uninterpreteds<'ctx> {
             .functions
             .get(&ident)
             .unwrap_or_else(|| panic!("function {ident} is not declared"));
-        decl.apply(args)
+        decl.decl.apply(args)
     }
 
     pub fn add_axiom(&mut self, ident: Ident, axiom: Bool<'ctx>) {
