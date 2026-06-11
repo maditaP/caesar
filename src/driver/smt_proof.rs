@@ -188,6 +188,20 @@ pub fn mk_function_encoder<'ctx>(
     depgraph: &DepGraph,
     options: &VerifyCommand,
 ) -> Result<Box<dyn FunctionEncoder<'ctx> + 'ctx>, CaesarError> {
+    mk_function_encoder_override(tcx, depgraph, options, options.opt_options.no_synonym_axiom, None)
+}
+
+/// Like [`mk_function_encoder`] but lets the caller override the
+/// `no_synonym_axiom` setting and the fuel bound independently of the CLI
+/// options.  When `max_fuel_override` is `Some(k)`, the fuel-based encodings
+/// use `k` instead of `options.opt_options.max_fuel`.
+pub fn mk_function_encoder_override<'ctx>(
+    tcx: &TyCtx,
+    depgraph: &DepGraph,
+    options: &VerifyCommand,
+    no_synonym_axiom: bool,
+    max_fuel_override: Option<usize>,
+) -> Result<Box<dyn FunctionEncoder<'ctx> + 'ctx>, CaesarError> {
     let fe_opt = options.opt_options.function_encoding;
     let partial_encoding = if options.opt_options.no_partial_strengthening {
         PartialEncoding::Partial
@@ -220,13 +234,13 @@ pub fn mk_function_encoder<'ctx>(
             let fuel_options = FuelEncodingOptions {
                 fuel_functions,
                 partial_encoding,
-                max_fuel: options.opt_options.max_fuel,
+                max_fuel: max_fuel_override.unwrap_or(options.opt_options.max_fuel),
                 computation: matches!(
                     fe_opt,
                     FunctionEncodingOption::FuelMonoComputation
                         | FunctionEncodingOption::FuelParamComputation
                 ),
-                synonym_axiom: !options.opt_options.no_synonym_axiom,
+                synonym_axiom: !no_synonym_axiom,
             };
             match fe_opt {
                 FunctionEncodingOption::FuelMono | FunctionEncodingOption::FuelMonoComputation => {
@@ -433,6 +447,55 @@ impl<'ctx> SmtVcProveTask<'ctx> {
             quant_vc: self.quant_vc,
         })
     }
+
+    /// Run the solver(s) on this SMT formula.
+    pub fn no_slice_run_solver<'smt>(
+        self,
+        options: &VerifyCommand,
+        limits_ref: &LimitsRef,
+        ctx: &'ctx Context,
+        translate: &mut TranslateExprs<'smt, 'ctx>,
+        ranges_constraints: &[Expr],
+    ) -> Result<SmtVcProveResultNoSlice<'ctx>, CaesarError> {
+        let mut prover = Prover::new(&ctx, IncrementalMode::Native);
+        if let Some(remaining) = limits_ref.time_left() {
+            prover.set_timeout(remaining);
+        }
+        // Add axioms and assumptions
+
+        translate.ctx.add_lit_axioms_to_prover(&mut prover);
+        translate
+            .ctx
+            .uninterpreteds()
+            .add_axioms_to_prover(&mut prover);
+
+        translate
+            .local_scope()
+            .add_assumptions_to_prover(&mut prover);
+        for constraint in ranges_constraints {
+            prover.add_assumption(&translate.t_bool(&constraint));
+        }
+
+        prover.add_provable(&self.vc);
+
+        if options.debug_options.z3_probe {
+            let goal = Goal::new(ctx, false, false, false);
+            for assertion in prover.get_assertions() {
+                goal.assert(&assertion);
+            }
+            eprintln!("Probe results \n{}", ProbeSummary::probe(ctx, &goal));
+        }
+        if options.debug_options.print_smt{
+            println!("verifier smt {}", prover.get_smtlib().into_string());
+        }
+        let result = prover.check_proof();
+        let model = prover.get_model();
+
+        Ok(SmtVcProveResultNoSlice {
+            prove_result: result,
+            model,
+        })
+    }
 }
 
 fn mk_valid_query_prover<'smt, 'ctx>(
@@ -517,6 +580,17 @@ pub struct SmtVcProveResult<'ctx> {
     model: Option<InstrumentedModel<'ctx>>,
     slice_model: Option<SliceModel>,
     quant_vc: QuantVcProveTask,
+}
+
+pub struct SmtVcProveResultNoSlice<'ctx> {
+    pub prove_result: ProveResult,
+    model: Option<InstrumentedModel<'ctx>>,
+}
+
+impl<'ctx> SmtVcProveResultNoSlice<'ctx> {
+    pub fn into_model(self) -> Option<InstrumentedModel<'ctx>> {
+        self.model
+    }
 }
 
 impl<'ctx> SmtVcProveResult<'ctx> {

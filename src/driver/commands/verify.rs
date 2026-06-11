@@ -11,7 +11,7 @@ use crate::{
             model_check::run_model_checking,
             options::{
                 DebugOptions, InputOptions, LanguageServerOptions, ModelCheckingOptions,
-                OptimizationOptions, ResourceLimitOptions, SliceOptions,
+                OptimizationOptions, ResourceLimitOptions, SliceOptions, SynthesizerOptions,
             },
             print_timings,
         },
@@ -49,6 +49,9 @@ pub struct VerifyCommand {
 
     #[command(flatten)]
     pub debug_options: DebugOptions,
+
+    #[command(flatten)]
+    pub synth_options: SynthesizerOptions,
 }
 
 pub async fn run_verify_command(options: VerifyCommand) -> ExitCode {

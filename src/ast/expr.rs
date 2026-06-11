@@ -692,6 +692,14 @@ impl ExprBuilder {
         })
     }
 
+    pub fn uint_lit(&self, value: BigUint) -> Expr {
+        Shared::new(ExprData {
+            kind: ExprKind::Lit(Spanned::new(self.span, LitKind::UInt(value))),
+            ty: Some(TyKind::UInt),
+            span: self.span,
+        })
+    }
+
     pub fn frac_lit(&self, value: BigRational) -> Expr {
         Shared::new(ExprData {
             kind: ExprKind::Lit(Spanned::new(self.span, LitKind::Frac(value))),

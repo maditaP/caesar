@@ -5,7 +5,7 @@ use crate::ast::UnOpKind;
 
 use super::{
     visit::{walk_expr, walk_stmt, VisitorMut},
-    Direction, Expr, ExprKind, Ident, StmtKind,
+    Direction, Expr, ExprKind, Ident, LitKind, StmtKind,
 };
 
 /// Helper to find all free variables in expressions.
@@ -302,4 +302,15 @@ mod test {
             vec![ident]
         );
     }
+}
+
+/// Extract a `u128` from an expression that is a `UInt` literal.
+/// Panics if the expression is not a `UInt` literal — callers must ensure this via type-checking.
+pub fn lit_u128(expr: &Expr) -> u128 {
+    if let ExprKind::Lit(lit) = &expr.kind {
+        if let LitKind::UInt(value) = &lit.node {
+            return u128::try_from(value).unwrap();
+        }
+    }
+    unreachable!()
 }
