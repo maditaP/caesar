@@ -27,6 +27,7 @@ use crate::driver::commands::options::{
 use crate::driver::commands::verify::VerifyCommand;
 use crate::driver::error::CaesarError;
 use crate::driver::item::SourceUnitName;
+use crate::ast::Expr;
 use crate::driver::quant_proof::{BoolVcProveTask, QuantVcProveTask};
 use crate::proof_rules::calculus::ProcSoundness;
 use crate::slicing::transform::SliceStmts;
@@ -148,6 +149,21 @@ pub fn run_smt_prove_task(
     vc_is_valid: BoolVcProveTask,
     proc_soundness: &ProcSoundness,
 ) -> Result<ProveResult, CaesarError> {
+    run_smt_prove_task_with_ranges(options, limits_ref, tcx, depgraph, name, server, slice_vars, vc_is_valid, proc_soundness, &[])
+}
+
+pub fn run_smt_prove_task_with_ranges(
+    options: &VerifyCommand,
+    limits_ref: &LimitsRef,
+    tcx: &TyCtx,
+    depgraph: &DepGraph,
+    name: &SourceUnitName,
+    server: &mut dyn Server,
+    slice_vars: SliceStmts,
+    vc_is_valid: BoolVcProveTask,
+    proc_soundness: &ProcSoundness,
+    ranges_constraints: &[Expr],
+) -> Result<ProveResult, CaesarError> {
     let ctx = Context::new(&z3::Config::default());
     let function_encoder = mk_function_encoder(tcx, depgraph, options)?;
     let dep_config = DepConfig::Set(vc_is_valid.get_dependencies());
@@ -164,7 +180,7 @@ pub fn run_smt_prove_task(
     }
 
     let mut result =
-        vc_is_valid.run_solver(options, limits_ref, name, &ctx, &mut translate, &slice_vars)?;
+        vc_is_valid.run_solver_with_ranges(options, limits_ref, name, &ctx, &mut translate, &slice_vars,ranges_constraints)?;
 
     server
         .handle_vc_check_result(name, &mut result, &mut translate, proc_soundness)
@@ -297,7 +313,7 @@ impl<'ctx> SmtVcProveTask<'ctx> {
     }
 
     /// Run the solver(s) on this SMT formula.
-    pub fn run_solver<'smt>(
+    pub fn run_solver_with_ranges<'smt>(
         self,
         options: &VerifyCommand,
         limits_ref: &LimitsRef,
@@ -305,19 +321,23 @@ impl<'ctx> SmtVcProveTask<'ctx> {
         ctx: &'ctx Context,
         translate: &mut TranslateExprs<'smt, 'ctx>,
         slice_vars: &SliceStmts,
+        ranges_constraints: &[Expr],
     ) -> Result<SmtVcProveResult<'ctx>, CaesarError> {
         let span = info_span!("SAT check");
         let _entered = span.enter();
 
-        let prover = mk_valid_query_prover(limits_ref, ctx, translate, &self.vc);
+        let mut prover = mk_valid_query_prover(limits_ref, ctx, translate, &self.vc);
 
+        for constraint in ranges_constraints {
+            prover.add_assumption(&translate.t_bool(&constraint));
+        }
         if options.debug_options.z3_probe {
             let goal = Goal::new(ctx, false, false, false);
             for assertion in prover.get_assertions() {
                 goal.assert(&assertion);
             }
             eprintln!(
-                "Probe results for {}:\n{}",
+                "In verifier (getting pvar cex): Probe results for {}:\n{}",
                 name,
                 ProbeSummary::probe(ctx, &goal)
             );
