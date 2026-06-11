@@ -513,6 +513,7 @@ pub struct FuncDecl {
     /// well. Functions with bodies are always computable, but this field will
     /// be `false` (because not explicitly marked).
     pub computable: bool,
+    pub syn: bool,
     pub span: Span,
 }
 
