@@ -4,7 +4,7 @@ use clap::Args;
 use z3rro::{prover::ProveResult, util::ReasonUnknown};
 
 use crate::{
-    ast::FileId,
+    ast::{Expr, FileId},
     driver::{
         commands::{
             mk_cli_server,
@@ -20,7 +20,8 @@ use crate::{
         front::parse_and_tycheck,
         item::Item,
         quant_proof::lower_quant_prove_task,
-        smt_proof::{run_smt_prove_task, set_global_z3_params},
+        ranges::{collect_ranges_from_decls, create_range_constraint},
+        smt_proof::{run_smt_prove_task_with_ranges, set_global_z3_params},
     },
     resource_limits::{await_with_resource_limits, LimitError, LimitsRef},
     servers::{Server, SharedServer},
@@ -255,7 +256,12 @@ fn verify_files_main(
         let vc_is_valid = lower_quant_prove_task(options, &limits_ref, &mut tcx, name, vc_expr)?;
 
         // Running the SMT prove task: translating to Z3, running the solver.
-        let result = run_smt_prove_task(
+        let ranges = collect_ranges_from_decls(&tcx.declarations.borrow());
+        let ranges_constraints: Vec<Expr> = ranges
+            .iter()
+            .map(|(ident, (range, ty))| create_range_constraint(ident.clone(), range, ty.clone()))
+            .collect();
+        let result = run_smt_prove_task_with_ranges(
             options,
             &limits_ref,
             &tcx,
@@ -264,6 +270,7 @@ fn verify_files_main(
             server,
             slice_vars,
             vc_is_valid,
+            &ranges_constraints,
         )?;
 
         // Handle reasons to stop the verifier.
