@@ -139,6 +139,7 @@ pub fn is_bot_lit(expr: &Expr) -> bool {
     }
 }
 
+
 /// Remove [`ExprKind::Cast`] from this expression. This is mainly used to make
 /// the pretty-printed expression look less verbose.
 pub fn remove_casts(expr: &Expr) -> Expr {
