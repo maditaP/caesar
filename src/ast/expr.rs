@@ -2,7 +2,7 @@
 
 use std::{fmt, str::FromStr};
 
-use num::{BigRational, BigUint, One, Zero};
+use num::{BigInt, BigRational, BigUint, One, Signed, Zero};
 
 use crate::{
     pretty::{parens_group, pretty_list, Doc, SimplePretty},
@@ -30,6 +30,26 @@ impl Expr {
             })
         };
         replace_with::replace_with(self, default, f)
+    }
+
+    pub fn func_calls(&self) -> Vec<Ident> {
+        match &self.kind {
+            ExprKind::Call(f, _) => vec![*f],
+            ExprKind::Binary(_, lhs, rhs) => {
+                let mut calls = lhs.func_calls();
+                calls.extend(rhs.func_calls());
+                calls
+            }
+            ExprKind::Unary(_, inner) => inner.func_calls(),
+            ExprKind::Cast(inner) => inner.func_calls(),
+            ExprKind::Ite(cond, then_expr, else_expr) => {
+                let mut calls = cond.func_calls();
+                calls.extend(then_expr.func_calls());
+                calls.extend(else_expr.func_calls());
+                calls
+            }
+            _ => vec![],
+        }
     }
 }
 
@@ -371,6 +391,8 @@ pub enum LitKind {
     Str(Symbol),
     /// An unsigned integer literal (`123`).
     UInt(BigUint),
+    /// A signed integer literal (`123`).
+    Int(BigInt),
     /// A number literal represented by a fraction.
     Frac(BigRational),
     /// Infinity,
@@ -391,8 +413,36 @@ impl LitKind {
     pub fn is_bot(&self) -> bool {
         match self {
             LitKind::UInt(num) => num.is_zero(),
+            LitKind::Int(num) => num.is_zero(),
             LitKind::Frac(frac) => frac.is_zero(),
             LitKind::Bool(b) => !b,
+            _ => false,
+        }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        match self {
+            LitKind::UInt(num) => num.is_zero(),
+            LitKind::Int(num) => num.is_zero(),
+            LitKind::Frac(frac) => frac.is_zero(),
+            _ => false,
+        }
+    }
+
+    pub fn is_one(&self) -> bool {
+        match self {
+            LitKind::UInt(num) => num.is_one(),
+            LitKind::Int(num) => num.is_one(),
+            LitKind::Frac(frac) => frac.is_one(),
+            _ => false,
+        }
+    }
+
+    pub fn is_negative(&self) -> bool {
+        match self {
+            LitKind::UInt(_) => false,
+            LitKind::Int(num) => num.is_negative(),
+            LitKind::Frac(frac) => frac.is_negative(),
             _ => false,
         }
     }
@@ -411,6 +461,7 @@ impl fmt::Display for LitKind {
         match self {
             LitKind::Str(symbol) => f.write_fmt(format_args!("\"{symbol}\"")),
             LitKind::UInt(num) => num.fmt(f),
+            LitKind::Int(num) => num.fmt(f),
             LitKind::Frac(frac) => frac.fmt(f),
             LitKind::Infinity => f.write_str("∞"),
             LitKind::Bool(b) => b.fmt(f),
@@ -600,7 +651,7 @@ impl ExprBuilder {
         match ty {
             TyKind::Bool | TyKind::UInt | TyKind::UReal | TyKind::EUReal => self.bot_lit(ty),
             TyKind::Int => self.cast(TyKind::Int, self.uint(0)),
-            TyKind::Real => self.cast(TyKind::Real, self.frac_lit(Zero::zero())),
+            TyKind::Real => self.cast(TyKind::Real, self.frac_lit_not_extended(Zero::zero())),
             _ => panic!("type {ty} has no zero element"),
         }
     }
@@ -633,12 +684,43 @@ impl ExprBuilder {
         })
     }
 
+    pub fn int_lit(&self, value: BigInt) -> Expr {
+        Shared::new(ExprData {
+            kind: ExprKind::Lit(Spanned::new(self.span, LitKind::Int(value))),
+            ty: Some(TyKind::Int),
+            span: self.span,
+        })
+    }
+
     pub fn frac_lit(&self, value: BigRational) -> Expr {
         Shared::new(ExprData {
             kind: ExprKind::Lit(Spanned::new(self.span, LitKind::Frac(value))),
             ty: Some(TyKind::EUReal),
             span: self.span,
         })
+    }
+
+    pub fn frac_lit_not_extended(&self, value: BigRational) -> Expr {
+        Shared::new(ExprData {
+            kind: ExprKind::Lit(Spanned::new(self.span, LitKind::Frac(value))),
+            ty: Some(TyKind::UReal),
+            span: self.span,
+        })
+    }
+
+    pub fn signed_frac_lit(&self, value: BigRational) -> Expr {
+        Shared::new(ExprData {
+            kind: ExprKind::Lit(Spanned::new(self.span, LitKind::Frac(value))),
+            ty: Some(TyKind::Real),
+            span: self.span,
+        })
+    }
+
+    pub fn abs_diff(&self, lhs: Expr, rhs: Expr, ty: TyKind) -> Expr {
+        let diff = self.binary(BinOpKind::Sub, Some(ty.clone()), lhs.clone(), rhs.clone());
+        let neg_diff = self.binary(BinOpKind::Sub, Some(ty.clone()), rhs.clone(), lhs.clone());
+        let ge = self.binary(BinOpKind::Ge, Some(TyKind::Bool), lhs, rhs);
+        self.ite(Some(ty), ge, diff, neg_diff)
     }
 }
 
