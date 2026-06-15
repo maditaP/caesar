@@ -1,0 +1,86 @@
+// RUN: @caesar synth --refinement-mode degree @file
+
+domain MoreInvariants {
+    syn func cowboy_duel_3way_inv_ab(flag_ab: Int) : EUReal
+    syn func cowboy_duel_3way_inv_ac(flag_ac: Int) : EUReal
+    syn func cowboy_duel_3way_inv_bc(flag_bc: Int) : EUReal
+}
+
+@ert
+coproc main() -> (flag_ab: Int, flag_ac: Int, flag_bc: Int)
+    pre cowboy_duel_3way_inv_ab(1)
+    post 0
+{
+    var prob_choice: Bool
+    flag_ab = 1
+    flag_ac = 1
+    flag_bc = 1
+    prob_choice = flip(1/3)
+    if prob_choice {
+        flag_ac = 0
+        flag_bc = 0
+        prob_choice = flip(1/2)
+        if prob_choice {
+            flag_ab = 0
+        } else {
+            flag_ab = 1
+        }
+    } else {
+        prob_choice = flip(1/2)
+        if prob_choice {
+            flag_ac = 0
+            flag_bc = 0
+        } else {
+            flag_ab = 0
+            flag_ac = 0
+        }
+    }
+    tick 1
+    if flag_ab == 1 {
+        @invariant(cowboy_duel_3way_inv_ab(flag_ab))
+        while 0 < flag_ab {
+            prob_choice = flip(1/3)
+            if prob_choice {
+                flag_ab = 0
+            } else {
+                prob_choice = flip(1/2)
+                if prob_choice {
+                    flag_ab = 0
+                } else {
+                    flag_ab = 1
+                }
+            }
+            tick 1
+        }
+    } else {
+        flag_ab = flag_ab
+    }
+    if flag_ac == 1 {
+        @invariant(cowboy_duel_3way_inv_ac(flag_ac))
+        while 0 < flag_ac {
+            prob_choice = flip(1/2)
+            if prob_choice {
+                flag_ac = 0
+            } else {
+                flag_ac = 0
+            }
+            tick 1
+        }
+    } else {
+        flag_ac = flag_ac
+    }
+    if flag_bc == 1 {
+        @invariant(cowboy_duel_3way_inv_bc(flag_bc))
+        while 0 < flag_bc {
+            prob_choice = flip(1/2)
+            if prob_choice {
+                flag_bc = 0
+            } else {
+                flag_bc = 0
+            }
+            tick 1
+        }
+    } else {
+        flag_bc = flag_bc
+    }
+}

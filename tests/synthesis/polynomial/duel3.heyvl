@@ -1,0 +1,23 @@
+// RUN: @caesar synth --refinement-mode degree --unsigned-coefficients @file
+
+domain Invariants {
+    syn func inv(tc: Bool, taWins: Bool, frac1: UReal, frac2: UReal, frac3:UReal, frac4:UReal, frac5:UReal) : EUReal
+}
+@wp coproc duel (a:UReal, b:UReal) -> (aWins:Bool)
+pre ?(a>=1 || a<=0 || b>=1 || b<=0) + (a/(a+b - (a*b) ))
+post [aWins]
+{
+aWins = true
+var c :Bool = true
+@invariant(inv(c, aWins, (a/(a+b - (a*b) )), b, (1-b),a , (1-a)))
+while (c) {
+    if aWins {
+        var stop: Bool = flip(a)
+        if stop { c = false } else { aWins = false }
+    }
+    else {
+        var stop: Bool = flip(b)
+        if stop { c = false } else { aWins = true }
+    }
+}
+}

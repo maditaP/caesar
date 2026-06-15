@@ -1,0 +1,29 @@
+// RUN: @caesar synth --refinement-mode degree @file
+
+domain MoreInvariants {
+    syn func cowboy_duel_inv(flag: Int) : EUReal
+}
+
+@ert
+coproc main() -> (flag: Int)
+    pre cowboy_duel_inv(1)
+    post 0
+{
+    var prob_choice: Bool
+    flag = 1
+    @invariant(cowboy_duel_inv(flag))
+    while 0 < flag {
+        prob_choice = flip(3/4)
+        if prob_choice {
+            flag = 0
+        } else {
+            prob_choice = flip(1/3)
+            if prob_choice {
+                flag = 0
+            } else {
+                flag = 1
+            }
+        }
+        tick 1
+    }
+}

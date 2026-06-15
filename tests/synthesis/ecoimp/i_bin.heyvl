@@ -1,0 +1,21 @@
+// RUN: @caesar synth --timeout 300 --refinement-mode degree @file
+// XFAIL: timeout
+
+domain MoreInvariants {
+    syn func bin_inv(n: Int, x: Int) : EUReal
+}
+
+@ert
+coproc main(init_n: Int) -> (x: Int, n: Int, r: UInt)
+    pre bin_inv(init_n, 0)
+    post 0
+{
+    x = 0
+    n = init_n
+    @invariant(bin_inv(n, x))
+    while x < n {
+        r = binom(10, 1, 2)
+        x = x + r
+        tick 1
+    }
+}

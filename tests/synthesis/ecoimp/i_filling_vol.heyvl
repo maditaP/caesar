@@ -1,0 +1,35 @@
+// RUN: @caesar synth --timeout 300 --refinement-mode degree @file
+// XFAIL: timeout
+
+domain MoreInvariants {
+    syn func filling_vol_inv(volMeasured: UInt, volToFill: UInt) : EUReal
+}
+
+@ert
+coproc main(init_volToFill: UInt) -> (volMeasured: UInt, volToFill: UInt, r: UInt)
+    pre filling_vol_inv(0, init_volToFill)
+    post 0
+{
+    volToFill = init_volToFill
+    volMeasured = 0
+    r = unif(0, 1)
+    volMeasured = volMeasured + r
+    @invariant(filling_vol_inv(volMeasured, volToFill))
+    while volMeasured <= volToFill {
+        if volMeasured + 10 > volToFill {
+            r = unif(9, 10)
+            volMeasured = volMeasured + r
+        } else {
+            if volMeasured + 3 > volToFill {
+                r = unif(2, 4)
+                volMeasured = volMeasured + r
+            } else {
+                r = unif(0, 2)
+                volMeasured = volMeasured + r
+            }
+        }
+        r = unif(0, 1)
+        volMeasured = volMeasured + r
+        tick 1
+    }
+}

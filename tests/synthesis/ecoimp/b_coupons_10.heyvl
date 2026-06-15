@@ -1,0 +1,24 @@
+// RUN: @caesar synth --refinement-mode degree @file
+
+domain MoreInvariants {
+    syn func coupons10_inv(coupons: UInt) : EUReal
+}
+
+@ert
+coproc main() -> (coupons: UInt, draw: UInt)
+    pre coupons10_inv(0)
+    post 0
+{
+    coupons = 0
+    draw = 0
+    @invariant(coupons10_inv(coupons))
+    while coupons < 10 {
+        tick 1
+        draw = unif(0, 10)
+        if draw > coupons {
+            coupons = coupons + 1
+        } else {
+            coupons = coupons + 0
+        }
+    }
+}

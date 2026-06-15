@@ -1,0 +1,28 @@
+// RUN: @caesar synth --timeout 300 --refinement-mode degree @file
+// XFAIL: timeout
+
+domain MoreInvariants {
+    syn func rdspeed_inv(x: Int, y: Int, m: Int, n: Int) : EUReal
+}
+
+@ert
+coproc main(init_x: Int, init_y: Int, init_m: Int, init_n: Int) -> (x: Int, y: Int, m: Int, n: Int, r: UInt)
+    pre rdspeed_inv(init_x, init_y, init_m, init_n)
+    post 0
+{
+    x = init_x
+    y = init_y
+    m = init_m
+    n = init_n
+    @invariant(rdspeed_inv(x, y, m, n))
+    while x + 3 <= n {
+        if y < m {
+            r = unif(0, 1)
+            y = y + r
+        } else {
+            r = unif(0, 3)
+            x = x + r
+        }
+        tick 1
+    }
+}

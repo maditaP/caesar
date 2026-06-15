@@ -1,0 +1,57 @@
+// RUN: @caesar synth --timeout 300 --refinement-mode degree @file
+
+domain MoreInvariants {
+    syn func roulette_inv(money: Int, n: Int) : EUReal
+}
+
+@ert
+coproc main(init_n: UInt) -> (money: Int, n: Int, r: UInt)
+    pre roulette_inv(10000, init_n)
+    post 0
+{
+    var prob_choice: Bool
+    n = init_n
+    money = 10000
+    @invariant(roulette_inv(money, n))
+    while n <= money {
+        prob_choice = flip(36/37)
+        if prob_choice {
+            prob_choice = flip(1/3)
+            if prob_choice {
+                prob_choice = flip(1/2)
+                if prob_choice {
+                    r = unif(3, 6)
+                    money = money + r
+                } else {
+                    r = unif(1, 2)
+                    money = money + r
+                }
+            } else {
+                prob_choice = flip(1/2)
+                if prob_choice {
+                    prob_choice = flip(1/3)
+                    if prob_choice {
+                        r = unif(3, 6)
+                        money = money + r
+                    } else {
+                        r = unif(1, 2)
+                        money = money + r
+                    }
+                } else {
+                    prob_choice = flip(2/3)
+                    if prob_choice {
+                        r = unif(3, 6)
+                        money = money - r
+                    } else {
+                        r = unif(5, 10)
+                        money = money - r
+                    }
+                }
+            }
+        } else {
+            r = unif(5, 10)
+            money = money - r
+        }
+        tick 1
+    }
+}

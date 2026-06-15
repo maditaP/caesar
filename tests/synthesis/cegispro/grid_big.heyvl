@@ -1,0 +1,25 @@
+// RUN: @caesar synth --timeout 300 --refinement-mode fixed @file
+// XFAIL: timeout
+
+domain Invariants {
+    syn func for_grid_big(a: UInt [0,1000], b:UInt [0,1000]) : EUReal
+}
+@wp coproc grid_big() -> (a: UInt, b: UInt)
+pre 0.99
+post [a < 1000 && 1000 <= b]
+{
+
+    a = 0
+    b = 0
+
+    @invariant(\infty*[a > 1000 || b > 1000] + for_grid_big(a,b))
+    while(a<1000 && b<1000){
+
+        var prob_choice: Bool = flip(0.5)
+        if prob_choice {
+            a = a+1
+        } else {
+           b = b+1
+        }
+    }
+}

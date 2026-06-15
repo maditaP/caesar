@@ -1,0 +1,29 @@
+// RUN: @caesar synth @file
+
+domain MoreInvariants {
+    syn func c4b_t61_first_inv(l: Int) : EUReal
+    syn func c4b_t61_second_inv(l: Int) : EUReal
+}
+
+@ert
+coproc main(init_l: Int) -> (l: Int)
+    pre (160/19) * nonneg_cast(0 \cup (init_l - 7)) + 7
+    post 0
+{
+    var prob_choice: Bool
+    l = init_l
+    @invariant(c4b_t61_first_inv(l))
+    while 8 <= l {
+        prob_choice = flip(19/20)
+        if prob_choice {
+            l = l - 8
+            tick 8
+        } else {
+        }
+    }
+    @invariant(c4b_t61_second_inv(l))
+    while 0 < l {
+        l = l - 1
+        tick 1
+    }
+}

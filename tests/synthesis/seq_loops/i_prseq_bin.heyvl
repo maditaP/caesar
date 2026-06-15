@@ -1,0 +1,33 @@
+// RUN: @caesar synth --timeout 300 --refinement-mode variable @file
+// XFAIL: timeout
+
+domain MoreInvariants {
+    syn func prseq_bin_first_inv(x: UInt, y: UInt) : EUReal
+    syn func prseq_bin_second_inv(y: UInt) : EUReal
+}
+
+@ert
+coproc main(init_x: UInt, init_y: UInt) -> (x: UInt, y: UInt, r: UInt)
+    pre [! (init_y + 2 < init_x) && (9 < init_y)] * ((1/5) * nonneg_cast(init_y)) + [(init_y + 2 < init_x) && (9 < init_y)] * (nonneg_cast(7 * init_x - 6 * init_y + 4) * (1/4)) + !?(init_y >= 10)
+    post 0
+{
+    var prob_choice: Bool
+    x = init_x
+    y = init_y
+    @invariant(prseq_bin_first_inv(x, y) + !?(y >= 10))
+    while y + 2 < x {
+        r = binom(4, 1, 2)
+        y = y + r
+        tick 3
+    }
+    @invariant(prseq_bin_second_inv(y))
+    while 9 < y {
+        prob_choice = flip(2/3)
+        if prob_choice {
+            y = y - 10
+        } else {
+            y = y + 0
+        }
+        tick 1
+    }
+}

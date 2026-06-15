@@ -1,0 +1,27 @@
+// RUN: @caesar synth --refinement-mode degree @file
+
+domain MoreInvariants {
+    syn func rfind_mc_inv(k: UInt, i: UInt, flag: UInt) : EUReal
+}
+
+@ert
+coproc main(init_k: UInt) -> (i: UInt, k: UInt, flag: UInt)
+    pre rfind_mc_inv(init_k,0, 1)
+    post 0
+{
+    var prob_choice: Bool
+    k = init_k
+    flag = 1
+    i = 0
+    @invariant(rfind_mc_inv(k, i, flag))
+    while i < k && 0 < flag {
+        prob_choice = flip(1/2)
+        if prob_choice {
+            flag = 0
+        } else {
+            flag = 1
+        }
+        i = i + 1
+        tick 1
+    }
+}

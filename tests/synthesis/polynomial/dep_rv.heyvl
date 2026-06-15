@@ -1,0 +1,26 @@
+// RUN: @caesar synth --timeout 300 --refinement-mode degree @file
+
+domain Invariants {
+    syn func inv3(x: UInt, y:UInt) : UReal
+}
+
+proc loop_proc(init_n: UInt, init_x: UInt, init_y: UInt) -> (x: UInt, y:UInt)
+pre init_x*init_y
+post x*y
+{
+    var n: UInt = init_n
+    x = init_x
+    y = init_y
+
+    @invariant(inv3(x,y))
+    while (n > 0) {
+        var prob_choice: Bool = flip(0.5)
+        if prob_choice {
+            x = x + 1
+        } else {
+            y = y + 1
+        }
+        n = n - 1
+    }
+
+}

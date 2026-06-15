@@ -1,0 +1,46 @@
+// RUN: @caesar synth --timeout 300 --refinement-mode degree @file
+
+domain MoreInvariants {
+    syn func prspeed_inv(x: UInt, y: UInt, m: UInt, n: UInt) : EUReal
+}
+
+@ert
+coproc main(init_x: UInt, init_y: UInt, init_m: UInt, init_n: UInt) -> (x: UInt, y: UInt, m: UInt, n: UInt)
+    pre prspeed_inv(init_x, init_y, init_m, init_n)
+    post 0
+{
+    var prob_choice: Bool
+    x = init_x
+    y = init_y
+    m = init_m
+    n = init_n
+    @invariant(prspeed_inv(x, y, m, n))
+    while x + 3 <= n {
+        if y < m {
+            prob_choice = flip(1/2)
+            if prob_choice {
+                y = y + 1
+            } else {
+                y = y + 0
+            }
+        } else {
+            prob_choice = flip(1/4)
+            if prob_choice {
+                x = x + 0
+            } else {
+                prob_choice = flip(1/3)
+                if prob_choice {
+                    x = x + 1
+                } else {
+                    prob_choice = flip(1/2)
+                    if prob_choice {
+                        x = x + 2
+                    } else {
+                        x = x + 3
+                    }
+                }
+            }
+        }
+        tick 1
+    }
+}

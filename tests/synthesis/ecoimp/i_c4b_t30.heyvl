@@ -1,0 +1,24 @@
+// RUN: @caesar synth --timeout 300 --refinement-mode degree @file
+// XFAIL: timeout
+
+domain MoreInvariants {
+    syn func c4b_t30_inv(x: Int, y: Int) : EUReal
+}
+
+@ert
+coproc main(init_x: Int, init_y: Int) -> (x: Int, y: Int, t: Int, r: UInt)
+    pre c4b_t30_inv(init_x, init_y)
+    post 0
+{
+    x = init_x
+    y = init_y
+    @invariant(c4b_t30_inv(x, y))
+    while 0 < x {
+        r = unif(1, 3)
+        x = x - r
+        t = x
+        x = y
+        y = t
+        tick 1
+    }
+}

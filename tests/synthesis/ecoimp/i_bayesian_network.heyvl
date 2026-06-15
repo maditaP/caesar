@@ -1,0 +1,108 @@
+// RUN: @caesar synth --refinement-mode degree @file
+
+domain MoreInvariants {
+    syn func bayesian_network_inv(n: Int) : EUReal
+}
+
+@ert
+coproc main(init_i: Int, init_d: Int, init_s: Int, init_l: Int, init_g: Int, init_n: Int) -> (i: Int, d: Int, s: Int, l: Int, g: Int, n: Int)
+    pre bayesian_network_inv(init_n)
+    post 0
+{
+    var prob_choice: Bool
+    i = init_i
+    d = init_d
+    s = init_s
+    l = init_l
+    g = init_g
+    n = init_n
+    @invariant(bayesian_network_inv(n))
+    while 0 < n {
+        prob_choice = flip(0.3)
+        if prob_choice {
+            i = 1
+        } else {
+            i = 0
+        }
+        tick 1
+        prob_choice = flip(0.4)
+        if prob_choice {
+            d = 1
+        } else {
+            d = 0
+        }
+        tick 1
+        if (i < 1) && (d < 1) {
+            prob_choice = flip(0.7)
+            if prob_choice {
+                g = 1
+            } else {
+                g = 0
+            }
+            tick 1
+        } else {
+            if (i < 1) && (0 < d) {
+                prob_choice = flip(0.95)
+                if prob_choice {
+                    g = 1
+                } else {
+                    g = 0
+                }
+                tick 1
+            } else {
+                if (0 < i) && (d < 1) {
+                    prob_choice = flip(0.1)
+                    if prob_choice {
+                        g = 1
+                    } else {
+                        g = 0
+                    }
+                    tick 1
+                } else {
+                    prob_choice = flip(0.5)
+                    if prob_choice {
+                        g = 1
+                    } else {
+                        g = 0
+                    }
+                    tick 1
+                }
+            }
+        }
+        if i < 1 {
+            prob_choice = flip(0.05)
+            if prob_choice {
+                s = 1
+            } else {
+                s = 0
+            }
+            tick 1
+        } else {
+            prob_choice = flip(0.8)
+            if prob_choice {
+                s = 1
+            } else {
+                s = 0
+            }
+            tick 1
+        }
+        if g < 1 {
+            prob_choice = flip(0.1)
+            if prob_choice {
+                l = 1
+            } else {
+                l = 0
+            }
+            tick 1
+        } else {
+            prob_choice = flip(0.6)
+            if prob_choice {
+                l = 1
+            } else {
+                l = 0
+            }
+            tick 1
+        }
+        n = n - 1
+    }
+}

@@ -1,0 +1,27 @@
+// RUN: @caesar synth --timeout 60 --refinement-mode degree @file
+
+domain MoreInvariants {
+    syn func race_inv(h: Int, t: Int) : EUReal
+}
+
+@ert
+coproc main(init_h: Int, init_t: Int) -> (h: Int, t: Int, r: UInt)
+    pre race_inv(init_h, init_t)
+    post 0
+{
+    var prob_choice: Bool
+    h = init_h
+    t = init_t
+    @invariant(race_inv(h, t))
+    while h <= t {
+        t = t + 1
+        prob_choice = flip(1/2)
+        if prob_choice {
+            r = unif(0, 10)
+            h = h + r
+        } else {
+            h = h + 0
+        }
+        tick 1
+    }
+}

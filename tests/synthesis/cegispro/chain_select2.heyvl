@@ -1,0 +1,72 @@
+// RUN: @caesar synth --timeout 300 --refinement-mode fixed @file
+
+domain Invariants {
+    syn func for_chain_select_stepsize(c:UInt [0,1], x:UInt [0,10000000], step:UInt [0,10]):EUReal
+}
+
+@wp coproc chain_select_stepsize() -> (step: UInt [0,10], x: UInt [0,10000000],c: UInt  [0,1])
+pre 0.6
+post [1<= c]
+{
+    c   = 0
+    step = 0
+    x = 0
+
+    @invariant(for_chain_select_stepsize(c, x, step))
+    while(c <= 0 && x < 10000000 && step <= 10){
+
+        if(step == 0) {
+
+            step = unif(1,10)
+
+        } else {
+
+            if(step <= 2){
+                var p: Bool = flip(0.0000001)
+                if(p) {
+                    c = 1
+                } else {
+                    x = x + step
+                }
+
+            } else {
+                if(step <= 4){
+                var p: Bool = flip(0.0000002)
+                if(p) {
+                    c = 1
+                } else {
+                    x = x + step
+                }
+
+            } else {
+                if(step <= 6){
+                var p: Bool = flip(0.0000003)
+                if(p) {
+                    c = 1
+                } else {
+                    x = x + step
+                }
+
+            } else {
+                if(step <= 8){
+                var p: Bool = flip(0.0000004)
+                if(p) {
+                    c = 1
+                } else {
+                    x = x + step
+                }
+
+            } else {
+                var p: Bool = flip(0.0000005)
+                if(p) {
+                    c = 1
+                } else {
+                    x = x + step
+                }
+            }
+            }
+            }
+            }
+        }
+    }
+}

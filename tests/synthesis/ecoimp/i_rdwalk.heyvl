@@ -1,0 +1,25 @@
+// RUN: @caesar synth --refinement-mode degree @file
+
+domain MoreInvariants {
+    syn func rdwalk_inv(x: Int, n: Int) : EUReal
+}
+
+@ert
+coproc main(init_x: Int, init_n: Int) -> (x: Int, n: Int)
+    pre rdwalk_inv(init_x, init_n)
+    post 0
+{
+    var prob_choice: Bool
+    x = init_x
+    n = init_n
+    @invariant(rdwalk_inv(x, n))
+    while x < n {
+        prob_choice = flip(1/2)
+        if prob_choice {
+            x = x + 2
+        } else {
+            x = x - 1
+        }
+        tick 1
+    }
+}

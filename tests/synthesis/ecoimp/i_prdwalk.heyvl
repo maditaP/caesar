@@ -1,0 +1,20 @@
+// RUN: @caesar synth --refinement-mode degree @file
+
+domain MoreInvariants {
+    syn func prdwalk_inv(x: Int, n: Int) : EUReal
+}
+
+@ert
+coproc main(init_x: Int, init_n: Int) -> (x: Int, n: Int, r: UInt)
+    pre prdwalk_inv(init_x, init_n)
+    post 0
+{
+    x = init_x
+    n = init_n
+    @invariant(prdwalk_inv(x, n))
+    while x < n {
+        r = unif(0, 1)
+        x = x + r
+        tick 1
+    }
+}

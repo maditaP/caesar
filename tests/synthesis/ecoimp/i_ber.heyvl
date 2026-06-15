@@ -1,0 +1,25 @@
+// RUN: @caesar synth --refinement-mode degree @file
+
+domain MoreInvariants {
+    syn func ber_inv(n: Int, x: Int) : EUReal
+}
+
+@ert
+coproc main(init_x: Int, init_n: Int) -> (x: Int, n: Int, r: UInt)
+    pre ber_inv(init_n, init_x)
+    post 0
+{
+    var prob_choice: Bool
+    x = init_x
+    n = init_n
+    @invariant(ber_inv(n, x))
+    while x < n {
+        prob_choice = ber(1, 2)
+        if prob_choice {
+            x = x + 1
+        } else {
+            x = x + 0
+        }
+        tick 1
+    }
+}

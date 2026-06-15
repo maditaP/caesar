@@ -1,0 +1,36 @@
+// RUN: @caesar synth --timeout 300 --refinement-mode fixed @file
+// XFAIL: timeout
+
+domain Invariants {
+    syn func hello(
+        tfail: UInt [0,5],
+        tsent: UInt [0,8000000],
+        tmaxsent: UInt [0,8000000]
+    ) : EUReal
+
+}
+
+coproc brp_finite_family (maxsent : UInt [0,8000000] ) -> (fail : UInt [0,5])
+pre 0.005
+post [fail == 5]
+{
+    var sent:  UInt = 0
+
+    fail = 0
+
+    @invariant(hello(fail,sent,maxsent))
+    while (
+        fail < 5 &&
+        sent < maxsent
+        && maxsent < 8000000
+
+    ) {
+        var prob_choice: Bool = flip(0.99)
+        if prob_choice {
+            fail = 0
+            sent = sent + 1
+        } else {
+            fail = fail + 1
+        }
+    }
+}
